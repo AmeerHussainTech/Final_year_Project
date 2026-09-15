@@ -40,6 +40,11 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
+  // Bypass service worker entirely in development
+  if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+    return;
+  }
+
   // Always go network-first for API calls
   if (url.pathname.startsWith('/api') || url.pathname.startsWith('/socket.io')) {
     event.respondWith(fetch(event.request));

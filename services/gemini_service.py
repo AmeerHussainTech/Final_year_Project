@@ -13,6 +13,7 @@ import logging
 import os
 import re
 from typing import Optional
+from services.ai.gemini_provider import GeminiProvider
 
 from dotenv import load_dotenv
 
@@ -26,6 +27,9 @@ except ImportError:
     current_genai = None
 
 try:
+    # AUDIT-06: Suppress FutureWarning from legacy SDK before it fires on import.
+    import warnings
+    warnings.filterwarnings("ignore", category=FutureWarning, message=r"(?s).*google\.generativeai.*")
     import google.generativeai as legacy_genai
 except ImportError:
     legacy_genai = None
@@ -57,11 +61,11 @@ def _env_float(name: str, default: float) -> float:
 
 # ── Configuration ───────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '').strip()
-GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-3.6-flash').strip()
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash').strip()
 MODEL_CANDIDATES = [
     model for model in [
         GEMINI_MODEL,
-        *os.getenv('GEMINI_FALLBACK_MODELS', 'gemini-3.5-flash-lite').split(','),
+        *os.getenv('GEMINI_FALLBACK_MODELS', 'gemini-2.0-flash,gemini-1.5-flash').split(','),
     ] if model.strip()
 ]
 GEMINI_TIMEOUT_SECONDS = max(1.0, _env_float('GEMINI_TIMEOUT_SECONDS', 45.0))
@@ -79,7 +83,7 @@ if GEMINI_API_KEY and not GEMINI_OFFLINE and current_genai is not None:
 
 if GEMINI_API_KEY and not GEMINI_OFFLINE and _new_client is None and legacy_genai is not None:
     try:
-        legacy_genai.configure(api_key=GEMINI_API_KEY)
+        legacy_genai.configure(api_key=GEMINI_API_KEY, transport='rest')
     except Exception as exc:
         logger.warning('[gemini_service] Legacy Gemini SDK configuration failed: %s', exc)
 

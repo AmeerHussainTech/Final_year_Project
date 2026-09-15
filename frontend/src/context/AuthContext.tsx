@@ -29,7 +29,7 @@ interface AuthContextType {
   token: string | null;
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (user: User, token: string) => void;
+  login: (user: User, token: string, refreshToken?: string) => void;
   logout: () => void;
   setUser: (user: User | null) => void;
   setToken: (token: string | null) => void;
@@ -50,20 +50,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
+  // ===== LOGOUT HANDLER =====
+  const logout = () => {
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('refresh_token');
+    setUser(null);
+    setToken(null);
+    console.log('User logged out');
+  };
+
   // ===== INITIALIZE AUTH STATE ON APP LOAD =====
   // Recover token from localStorage if it exists
   useEffect(() => {
     const initializeAuth = async () => {
       try {
-        // ===== STEP 1: RECOVER TOKEN FROM LOCALSTORAGE =====
         const storedToken = localStorage.getItem('auth_token');
 
         if (storedToken) {
           setToken(storedToken);
 
-          // ===== STEP 2: VERIFY TOKEN BY FETCHING CURRENT USER =====
-          // This ensures the token is still valid
-          // Use VITE_API_BASE_URL so this works in both dev and production
           const apiBase = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
           const response = await fetch(`${apiBase}/auth/me`, {
             method: 'GET',
@@ -77,16 +82,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const data = await response.json();
             setUser(data.user);
           } else {
-            // Token is invalid or expired
-            localStorage.removeItem('auth_token');
-            setToken(null);
+            // Attempt auto-refresh if access token failed
+            const storedRefreshToken = localStorage.getItem('refresh_token');
+            if (storedRefreshToken) {
+              const refreshRes = await fetch(`${apiBase}/auth/refresh`, {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${storedRefreshToken}`,
+                  'Content-Type': 'application/json'
+                }
+              });
+              if (refreshRes.ok) {
+                const refreshData = await refreshRes.json();
+                if (refreshData.access_token) {
+                  localStorage.setItem('auth_token', refreshData.access_token);
+                  setToken(refreshData.access_token);
+                  const meRes = await fetch(`${apiBase}/auth/me`, {
+                    headers: { 'Authorization': `Bearer ${refreshData.access_token}` }
+                  });
+                  if (meRes.ok) {
+                    const meData = await meRes.json();
+                    setUser(meData.user);
+                    return;
+                  }
+                }
+              }
+            }
+            logout();
           }
         }
       } catch (error) {
         console.error('Error initializing auth:', error);
-        // Clear invalid token on error
-        localStorage.removeItem('auth_token');
-        setToken(null);
+        logout();
       } finally {
         setIsLoading(false);
       }
@@ -95,40 +122,51 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     initializeAuth();
   }, []);
 
-  // ===== LOGIN HANDLER =====
-  /**
-   * Login function to set user and token
-   * Automatically saves token to localStorage
-   *
-   * @param user - User object from server
-   * @param newToken - JWT access token from server
-   */
-  const login = (user: User, newToken: string) => {
-    // ===== CRITICAL: SECURE TOKEN STORAGE =====
-    // Save JWT token to localStorage for persistence across page refreshes
-    // Token is automatically sent with every API request via interceptor
-    localStorage.setItem('auth_token', newToken);
+  // ===== AUTO-REFRESH ON TOKEN EXPIRY EVENT =====
+  useEffect(() => {
+    const handleExpiry = async () => {
+      const storedRefreshToken = localStorage.getItem('refresh_token');
+      if (!storedRefreshToken) {
+        logout();
+        return;
+      }
+      try {
+        const apiBase = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
+        const res = await fetch(`${apiBase}/auth/refresh`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${storedRefreshToken}`,
+            'Content-Type': 'application/json',
+          },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.access_token) {
+            localStorage.setItem('auth_token', data.access_token);
+            setToken(data.access_token);
+            return;
+          }
+        }
+        logout();
+      } catch (err) {
+        console.error('Failed to refresh auth token:', err);
+        logout();
+      }
+    };
 
+    window.addEventListener('auth-token-expired', handleExpiry);
+    return () => window.removeEventListener('auth-token-expired', handleExpiry);
+  }, []);
+
+  // ===== LOGIN HANDLER =====
+  const login = (user: User, newToken: string, refreshToken?: string) => {
+    localStorage.setItem('auth_token', newToken);
+    if (refreshToken) {
+      localStorage.setItem('refresh_token', refreshToken);
+    }
     setUser(user);
     setToken(newToken);
-
     console.log('User logged in:', user.email);
-  };
-
-  // ===== LOGOUT HANDLER =====
-  /**
-   * Logout function to clear auth state
-   * Removes token from localStorage
-   */
-  const logout = () => {
-    // ===== STEP 1: CLEAR LOCALSTORAGE =====
-    localStorage.removeItem('auth_token');
-
-    // ===== STEP 2: CLEAR STATE =====
-    setUser(null);
-    setToken(null);
-
-    console.log('User logged out');
   };
 
   // ===== CONTEXT VALUE =====

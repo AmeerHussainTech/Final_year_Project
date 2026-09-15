@@ -27,6 +27,15 @@ except ImportError:
     current_genai = None
 
 try:
+    # AUDIT-06: Suppress the FutureWarning emitted on import of the legacy SDK.
+    # The codebase already prefers google.genai; this fallback remains for environments
+    # where google-genai is not yet installed. Migration tracked in requirements.txt.
+    import warnings
+    warnings.filterwarnings(
+        "ignore",
+        category=FutureWarning,
+        message=r"(?s).*google\.generativeai.*",
+    )
     import google.generativeai as legacy_genai
 except ImportError:
     legacy_genai = None
@@ -84,9 +93,9 @@ class GeminiProvider(AIProvider):
         max_retries: int = 2,
     ):
         self.api_key = api_key or os.getenv('GEMINI_API_KEY', '').strip()
-        self.model_name = model or os.getenv('GEMINI_MODEL', 'gemini-3.6-flash').strip()
+        self.model_name = model or os.getenv('GEMINI_MODEL', 'gemini-2.5-flash').strip()
         self.fallback_models = fallback_models or [
-            m.strip() for m in os.getenv('GEMINI_FALLBACK_MODELS', 'gemini-3.5-flash-lite').split(',') if m.strip()
+            m.strip() for m in os.getenv('GEMINI_FALLBACK_MODELS', 'gemini-2.0-flash,gemini-1.5-flash').split(',') if m.strip()
         ]
         self.timeout_seconds = max(1.0, timeout_seconds or _env_float('GEMINI_TIMEOUT_SECONDS', 45.0))
         self.max_retries = max(1, max_retries or _env_int('GEMINI_MAX_RETRIES', 2))
@@ -102,7 +111,7 @@ class GeminiProvider(AIProvider):
 
     def _init_clients(self) -> None:
         """Initialize Gemini SDK clients (current and/or legacy)."""
-        offline = _env_bool('PRESENTATION_REWRITER_OFFLINE', False)
+        offline = _env_bool('FORCE_OFFLINE_MODE', False)
         if offline or not self.api_key:
             logger.info("[gemini_provider] Gemini disabled (offline or no API key).")
             return
@@ -116,7 +125,7 @@ class GeminiProvider(AIProvider):
 
         if self._new_client is None and legacy_genai is not None:
             try:
-                legacy_genai.configure(api_key=self.api_key)
+                legacy_genai.configure(api_key=self.api_key, transport='rest')
                 self._legacy_configured = True
                 logger.info("[gemini_provider] Legacy Gemini SDK initialized.")
             except Exception as exc:
@@ -254,7 +263,6 @@ class GeminiProvider(AIProvider):
         system_instruction: Optional[str] = None,
     ) -> str:
         """Use the current google.genai SDK."""
-        contents = [] if not system_instruction else []
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(
                 self._new_client.models.generate_content,

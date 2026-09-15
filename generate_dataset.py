@@ -23,7 +23,7 @@ def generate_synthetic_data():
     """
     print("[START] Starting expert multi-context synthetic dataset generation (rate-limit safe)...", flush=True)
     
-    model = genai.GenerativeModel('gemini-3.6-flash')
+    model = genai.GenerativeModel(os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'))
     
     dataset = []
     

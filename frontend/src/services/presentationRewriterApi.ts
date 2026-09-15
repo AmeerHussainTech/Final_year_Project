@@ -213,9 +213,9 @@ const parseResponse = async (response: Response, fallbackMessage: string) => {
   const contentType = response.headers.get('content-type') || '';
   const data = contentType.includes('application/json')
     ? await response.json()
-    : { success: false, message: await response.text() };
+    : { success: false, error: 'ResponseError', message: await response.text() };
   if (!response.ok || !data.success) {
-    throw new Error(data.message || fallbackMessage);
+    throw new Error(data.message || data.error || fallbackMessage);
   }
   return data;
 };
@@ -312,4 +312,17 @@ export const fetchSlideReport = async (
  */
 export const getReportPdfUrl = (filename: string): string => {
   return `${API_BASE_URL}/presentation-rewriter/report/${encodeURIComponent(filename)}/pdf`;
+};
+
+/**
+ * Resolve download URLs to full API origin if relative (ISSUE-18)
+ */
+export const getDownloadUrl = (path: string): string => {
+  if (!path) return '';
+  if (path.startsWith('http://') || path.startsWith('https://')) {
+    return path;
+  }
+  const rootUrl = API_BASE_URL.replace(/\/api\/?$/, '');
+  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  return `${rootUrl}${cleanPath}`;
 };

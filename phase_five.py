@@ -12,6 +12,8 @@ Key Features:
 import os
 import logging
 from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required
+from services.rate_limiter import rate_limit
 from datetime import datetime
 from dotenv import load_dotenv
 from services.language_tool_service import (
@@ -69,6 +71,8 @@ def format_chat_history(frontend_history: list) -> list:
 
 
 @phase_five_bp.route('/practice-chat', methods=['POST'])
+@jwt_required(optional=True)
+@rate_limit(limit_authenticated=30, limit_guest=5)
 def practice_chat():
     """
     AI coach chat endpoint for multi-turn practice mode conversations.
@@ -109,6 +113,7 @@ def practice_chat():
 
         if data is None:
             return jsonify({
+                "success": False,
                 "error": "Invalid JSON",
                 "message": "Request body must be valid JSON"
             }), 400
@@ -118,6 +123,7 @@ def practice_chat():
 
         if not message:
             return jsonify({
+                "success": False,
                 "error": "Missing message field",
                 "message": "Please provide a 'message' field with your input"
             }), 400
@@ -144,11 +150,10 @@ def practice_chat():
 Grammar Score: {grammar_score_val}/100  |  Issues Found: {len(grammar_issues)}
 {grammar_summary}
 IMPORTANT: Gently point out these grammar issues in your coaching response.
-Be specific — quote the erroneous phrase and suggest the correction.
---- END GRAMMAR ANALYSIS ---"""
-                    print(f"[AI COACH] LanguageTool: {len(grammar_issues)} grammar issues in user message.")
+Be specific — quote the erroneous phrase and suggest the correction."""
+                    logger.info("[AI COACH] LanguageTool: %d grammar issues in user message.", len(grammar_issues))
         except Exception as _ge:
-            print(f"[AI COACH WARN] Grammar pre-pass failed: {_ge}")
+            logger.warning("[AI COACH WARN] Grammar pre-pass failed: %s", _ge)
 
         # ===== STEP 2: BUILD SYSTEM PROMPT WITH CONTEXT INJECTION =====
         # CRITICAL: The system prompt establishes the AI's role and constraints
@@ -202,14 +207,16 @@ CRITICAL MANDATE - CONCISE & QUESTION-APPROPRIATE RESPONSES:
         ai_response_text = coach_result.get("response", "Keep practicing with clear WPM pacing and structured slides.")
 
         if not ai_response_text:
-            print("❌ Empty response from Gemini API")
+            logger.error("Empty response from coach intent engine")
             return jsonify({
+                "success": False,
                 "error": "Empty response from AI model",
                 "message": "The AI model returned an empty response. Please try again."
             }), 500
 
         # ===== STEP 7: COMPILE AND RETURN RESPONSE =====
         chat_response = {
+            "success": True,
             "status": "success",
             "ai_response": ai_response_text,
             "message_id": f"msg_{int(datetime.now().timestamp() * 1000)}",
@@ -220,15 +227,12 @@ CRITICAL MANDATE - CONCISE & QUESTION-APPROPRIATE RESPONSES:
             "grammar_issues_count": len(grammar_issues),
         }
 
-        print(f"✅ AI Coach response generated successfully")
+        logger.info("AI Coach response generated successfully")
 
         return jsonify(chat_response), 200
 
     except Exception as e:
-        # ===== ERROR HANDLING =====
-        # Catch all exceptions from Gemini API calls, network errors, etc.
-        
-        print(f"❌ Error during AI coach chat: {str(e)}")
+        logger.error("Error during AI coach chat: %s", e, exc_info=True)
 
         # Provide user-friendly error messages based on exception type
         error_message = str(e)
@@ -241,6 +245,7 @@ CRITICAL MANDATE - CONCISE & QUESTION-APPROPRIATE RESPONSES:
             error_message = "Network timeout. Please check your connection and try again."
 
         return jsonify({
+            "success": False,
             "error": "AI coach service unavailable",
             "message": error_message,
             "details": str(e)

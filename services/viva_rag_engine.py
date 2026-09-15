@@ -13,10 +13,6 @@ import sys
 import os
 from typing import List, Dict, Any
 
-site_packages = os.path.expanduser(r'~\AppData\Roaming\Python\Python314\site-packages')
-if os.path.exists(site_packages) and site_packages not in sys.path:
-    sys.path.insert(0, site_packages)
-
 logger = logging.getLogger(__name__)
 
 # Lazy imports for heavy ML libraries
@@ -165,10 +161,11 @@ PREP_TIPS = {
 }
 
 
-def compute_difficulty_score(chunk: Dict[str, Any], term: str) -> str:
+def compute_difficulty_score(chunk: Dict[str, Any], term: str, nlp=None) -> str:
     """Compute question difficulty level based on length, term complexity, and spaCy tree depth."""
     text = chunk.get("text", "")
-    nlp = _load_spacy()
+    if nlp is None:
+        nlp = _load_spacy()
     tree_depth = 1
     if nlp:
         doc = nlp(text[:500])
@@ -201,10 +198,47 @@ def generate_viva_questions_rag(
     chunks = chunk_text(extracted_text, target_word_count=180)
     index, embeddings = build_faiss_index(chunks)
     
+    # ISSUE-08: Utilize the FAISS vector index with topical queries to retrieve the most critical defense-worthy passages
+    ordered_chunks = chunks
+    if index is not None and len(chunks) > 0:
+        try:
+            import faiss
+            model = _load_sentence_model()
+            if model is not None:
+                # Seed queries targeting viva defense focus areas: methodology, results, architecture, limitations
+                seed_queries = [
+                    "methodology implementation architecture workflow system design",
+                    "evaluation performance metrics experimental results accuracy",
+                    "limitations challenges trade-offs future work comparison",
+                    "core objectives problem statement foundational concepts"
+                ]
+                query_embeddings = model.encode(seed_queries, convert_to_numpy=True)
+                faiss.normalize_L2(query_embeddings)
+
+                k = min(len(chunks), max(3, num_questions))
+                distances, indices = index.search(query_embeddings, k)
+
+                retrieved_indices = []
+                for query_idx_row in indices:
+                    for idx in query_idx_row:
+                        if 0 <= idx < len(chunks) and idx not in retrieved_indices:
+                            retrieved_indices.append(idx)
+
+                # Include any unselected chunks to guarantee complete document coverage
+                for i in range(len(chunks)):
+                    if i not in retrieved_indices:
+                        retrieved_indices.append(i)
+
+                ordered_chunks = [chunks[i] for i in retrieved_indices]
+        except Exception as e:
+            logger.warning("[viva_rag_engine] FAISS search query fallback: %s", e)
+            ordered_chunks = chunks
+
     questions = []
     question_id = 1
+    shared_nlp = _load_spacy()
 
-    for i, chunk in enumerate(chunks):
+    for i, chunk in enumerate(ordered_chunks):
         terms = extract_key_terms(chunk["text"])
         if not terms:
             continue
@@ -212,7 +246,7 @@ def generate_viva_questions_rag(
         primary_term = terms[0]
         secondary_term = terms[1] if len(terms) > 1 else "the overarching framework"
 
-        difficulty = compute_difficulty_score(chunk, primary_term)
+        difficulty = compute_difficulty_score(chunk, primary_term, nlp=shared_nlp)
         templates = QUESTION_TEMPLATES[difficulty]
         template = templates[(question_id - 1) % len(templates)]
 
@@ -237,8 +271,8 @@ def generate_viva_questions_rag(
             break
 
     # If we need more questions, repeat with secondary terms
-    if len(questions) < num_questions and chunks:
-        for chunk in chunks:
+    if len(questions) < num_questions and ordered_chunks:
+        for chunk in ordered_chunks:
             terms = extract_key_terms(chunk["text"])
             for t in terms[1:]:
                 if len(questions) >= num_questions:

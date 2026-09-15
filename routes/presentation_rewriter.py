@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request, send_file, url_for
 from flask_jwt_extended import jwt_required
+from services.rate_limiter import rate_limit
 from werkzeug.exceptions import RequestEntityTooLarge
 
 from services.download_service import (
@@ -34,13 +35,14 @@ presentation_rewriter_bp = Blueprint(
 ensure_download_folder()
 
 
-def _error(message: str, status: int):
-    return jsonify({'success': False, 'message': message}), status
+def _error(message: str, status: int, error: str = None):
+    error_code = error or ("BadRequest" if status == 400 else ("NotFound" if status == 404 else ("PayloadTooLarge" if status == 413 else ("ServiceUnavailable" if status == 502 else "InternalError"))))
+    return jsonify({'success': False, 'error': error_code, 'message': message}), status
 
 
 @presentation_rewriter_bp.errorhandler(RequestEntityTooLarge)
 def handle_upload_too_large(_exception):
-    return _error(f'File too large. Maximum allowed size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.', 413)
+    return _error(f'File too large. Maximum allowed size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.', 413, 'PayloadTooLarge')
 
 
 def _save_validated_upload(file_storage, original_filename: str) -> str:
@@ -69,6 +71,7 @@ VALID_TONES = {'professional', 'academic', 'business', 'technical', 'executive',
 
 @presentation_rewriter_bp.route('/submit', methods=['POST'])
 @jwt_required(optional=True)
+@rate_limit(limit_authenticated=20, limit_guest=3)
 def submit_presentation():
     """Accept a PPTX, rewrite supported text, and return a download URL.
 
@@ -191,6 +194,7 @@ def submit_presentation():
 
 @presentation_rewriter_bp.route('/analyze', methods=['POST'])
 @jwt_required(optional=True)
+@rate_limit(limit_authenticated=20, limit_guest=3)
 def analyze_presentation():
     """Analyze a PPTX or PDF without producing an output file."""
     temporary_path = None
@@ -292,6 +296,7 @@ def get_progress(filename: str):
         except FileNotFoundError:
             return jsonify({
                 'success': False,
+                'error': 'NotFound',
                 'message': 'No progress information available for this file.',
             }), 404
     done = data['percent'] >= 100

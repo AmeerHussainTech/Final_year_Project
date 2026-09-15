@@ -19,6 +19,10 @@ export interface UseLiveSessionProps {
 
 export const useLiveSession = ({ userId, videoRef }: UseLiveSessionProps) => {
   const [status, setStatus] = useState<SessionStatus>('IDLE');
+  const statusRef = useRef<SessionStatus>('IDLE');
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [currentQuestion, setCurrentQuestion] = useState<string | null>(null);
   const [realtimeFeedback, setRealtimeFeedback] = useState<RealtimeFeedback>({
@@ -37,13 +41,20 @@ export const useLiveSession = ({ userId, videoRef }: UseLiveSessionProps) => {
   const videoIntervalRef = useRef<any>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioIntervalRef = useRef<any>(null);
+  const audioStreamRef = useRef<MediaStream | null>(null);
 
   // Initialize socket connection
   const connectSocket = () => {
     if (socketRef.current) return;
 
-    const socket = io('http://localhost:5000/ws/live-session', {
-      transports: ['websocket'],
+    const apiBase = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:5000/api';
+    const socketHost = (import.meta as any).env?.VITE_SOCKET_URL || 
+      (apiBase.startsWith('http') ? apiBase.replace(/\/api\/?$/, '') : window.location.origin);
+
+    const socket = io(`${socketHost}/ws/live-session`, {
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
     });
 
     socket.on('connect', () => {
@@ -158,6 +169,11 @@ export const useLiveSession = ({ userId, videoRef }: UseLiveSessionProps) => {
       mediaRecorderRef.current.stop();
       mediaRecorderRef.current = null;
     }
+    // ISSUE-10: Release all microphone audio tracks so hardware indicator turns off
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach((track) => track.stop());
+      audioStreamRef.current = null;
+    }
   };
 
   // Loop for video frames and audio chunks streaming
@@ -190,12 +206,13 @@ export const useLiveSession = ({ userId, videoRef }: UseLiveSessionProps) => {
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
+        audioStreamRef.current = stream;
         localAudioStream = stream;
         const mediaRecorder = new MediaRecorder(stream);
         mediaRecorderRef.current = mediaRecorder;
 
         mediaRecorder.ondataavailable = async (e) => {
-          if (e.data.size > 0 && socketRef.current && status === 'STREAMING') {
+          if (e.data.size > 0 && socketRef.current && statusRef.current === 'STREAMING') {
             // Read blob as base64 string
             const reader = new FileReader();
             reader.readAsDataURL(e.data);
@@ -218,8 +235,11 @@ export const useLiveSession = ({ userId, videoRef }: UseLiveSessionProps) => {
             mediaRecorder.requestData();
           }
         }, 3000);
-      }).catch((err) => {
-        console.warn('Microphone access denied or unavailable. Streaming visuals only.', err);
+      }).catch((err: any) => {
+        // ISSUE-09: Gracefully handle rejected microphone permissions
+        console.error('Microphone access denied or error:', err);
+        setError(`Microphone access error: ${err?.message || 'Permission denied'}`);
+        stopSession();
       });
     } else {
       stopMediaStreaming();
@@ -227,8 +247,12 @@ export const useLiveSession = ({ userId, videoRef }: UseLiveSessionProps) => {
 
     return () => {
       audioActive = false;
+      if (audioStreamRef.current) {
+        audioStreamRef.current.getTracks().forEach((track) => track.stop());
+        audioStreamRef.current = null;
+      }
       if (localAudioStream) {
-        localAudioStream.getTracks().forEach((track) => track.stop());
+        (localAudioStream as MediaStream).getTracks().forEach((track) => track.stop());
       }
       stopMediaStreaming();
     };

@@ -24,7 +24,7 @@ if hasattr(sys.stderr, 'reconfigure'):
     except Exception:
         pass
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_socketio import SocketIO
@@ -39,7 +39,7 @@ load_dotenv()
 socketio = SocketIO()
 
 # Import blueprints
-from auth import auth_bp, register_jwt_error_handlers, signup, login, firebase_login, get_current_user
+from auth import auth_bp, register_jwt_error_handlers, signup, login, firebase_login, get_current_user, refresh
 from phase_two import phase_two_bp
 from phase_four import phase_four_bp
 from phase_five import phase_five_bp
@@ -51,7 +51,54 @@ from services.download_service import MAX_UPLOAD_BYTES
 import logging
 import time
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s [%(name)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
+
+def _start_pptx_purge_worker(max_age_hours: int = 24, interval_seconds: int = 3600):
+    """Background daemon thread to purge generated presentations and uploads older than max_age_hours."""
+    import threading
+    import time
+    import glob
+
+    # Protected extensions that must NEVER be deleted by purge worker
+    PROTECTED_EXTENSIONS = {'.task', '.xml', '.onnx', '.model', '.bin', '.py', '.gitkeep', '.txt_meta'}
+    PURGE_EXTENSIONS = {'.pptx', '.pdf', '.docx', '.txt', '.upload', '.png', '.jpg', '.jpeg', '.json'}
+
+    def _purge_loop():
+        while True:
+            try:
+                now = time.time()
+                cutoff = now - (max_age_hours * 3600)
+                folders = [
+                    'downloads',
+                    'generated_presentations',
+                    os.path.join('instance', 'uploads'),
+                    os.path.join('instance', 'generated_presentations'),
+                ]
+                for folder in folders:
+                    if not os.path.exists(folder):
+                        continue
+                    for f in glob.glob(os.path.join(folder, '**', '*'), recursive=True):
+                        if os.path.isfile(f):
+                            ext = os.path.splitext(f)[1].lower()
+                            if ext in PROTECTED_EXTENSIONS:
+                                continue
+                            if ext in PURGE_EXTENSIONS and os.path.getmtime(f) < cutoff:
+                                try:
+                                    os.remove(f)
+                                    logger.info("[CLEANUP] Purged expired file: %s", f)
+                                except OSError:
+                                    pass
+            except Exception as ex:
+                logger.warning("[CLEANUP] File purge cycle warning: %s", ex)
+            time.sleep(interval_seconds)
+
+    thread = threading.Thread(target=_purge_loop, daemon=True, name="pptx_purge_worker")
+    thread.start()
 
 def prewarm_ml_models():
     """
@@ -104,6 +151,9 @@ def create_app():
     # Pre-warm ML models in background thread so server starts instantly
     threading.Thread(target=prewarm_ml_models, daemon=True).start()
 
+    # Start TTL purge worker for generated files and uploads
+    _start_pptx_purge_worker()
+
     # ===== JWT CONFIGURATION =====
     # CRITICAL: In production, use a strong secret key from environment variables
     jwt_secret_key = os.getenv('JWT_SECRET_KEY', '').strip()
@@ -124,7 +174,15 @@ def create_app():
     if cors_origins_env and cors_origins_env != '*':
         parsed_origins = [o.strip() for o in cors_origins_env.split(',') if o.strip()]
     else:
-        parsed_origins = DEFAULT_ALLOWED_ORIGINS
+        parsed_origins = list(DEFAULT_ALLOWED_ORIGINS)
+
+    # AUDIT-09: Allow dynamic Vercel preview deployments either when not in production
+    # OR when ALLOW_VERCEL_PREVIEWS=true is explicitly set (useful for Render+Vercel stacks).
+    flask_env = os.getenv('FLASK_ENV', 'development').lower()
+    allow_vercel_previews = os.getenv('ALLOW_VERCEL_PREVIEWS', 'false').lower() in ('1', 'true', 'yes', 'on')
+    if flask_env != 'production' or allow_vercel_previews:
+        import re
+        parsed_origins.append(re.compile(r"^https://.*\.vercel\.app$"))
 
     CORS(
         app,
@@ -149,18 +207,18 @@ def create_app():
     # ===== SOCKET.IO CONFIGURATION =====
     socketio.init_app(app, cors_allowed_origins=parsed_origins)
 
-    # ===== MONGO CONFIGURATION & VERIFICATION =====
+    # ===== DATABASE INITIALIZATION VERIFICATION =====
     with app.app_context():
         try:
             from models import db
             if db is not None:
-                print("[INIT OK] Database layer initialized successfully")
+                logger.info("[INIT OK] Database layer initialized successfully")
         except Exception as e:
-            print(f"[INIT FAIL] Database initialization failed: {str(e)}")
+            logger.error("[INIT FAIL] Database initialization failed: %s", e)
 
     # ===== REGISTER JWT ERROR HANDLERS =====
-    # Handles expired, invalid, and missing JWT tokens
-    register_jwt_error_handlers(app)
+    # Handles expired, invalid, and missing JWT tokens on JWTManager (ISSUE-04)
+    register_jwt_error_handlers(jwt, app)
 
     # ===== REGISTER BLUEPRINTS =====
     # Phase 1: Authentication
@@ -173,6 +231,7 @@ def create_app():
     auth_compat_bp.add_url_rule('/login', 'login_compat', login, methods=['POST', 'OPTIONS'])
     auth_compat_bp.add_url_rule('/signup', 'signup_compat', signup, methods=['POST', 'OPTIONS'])
     auth_compat_bp.add_url_rule('/me', 'me_compat', get_current_user, methods=['GET', 'OPTIONS'])
+    auth_compat_bp.add_url_rule('/refresh', 'refresh_compat', refresh, methods=['POST', 'OPTIONS'])
     app.register_blueprint(auth_compat_bp)
     
     # Phase 2: Document Analysis
@@ -213,16 +272,39 @@ def create_app():
         """Render.com health check endpoint."""
         return jsonify({"status": "ok"}), 200
 
+    @app.route('/downloads/<path:filename>', methods=['GET'])
+    def serve_download(filename):
+        """Serve application installers (Windows, macOS, Android APK)."""
+        candidate_dirs = [
+            os.path.join(app.root_path, 'frontend', 'public', 'downloads'),
+            os.path.join(app.root_path, 'downloads'),
+        ]
+        for d in candidate_dirs:
+            if os.path.isfile(os.path.join(d, filename)):
+                return send_from_directory(d, filename, as_attachment=True)
+        return jsonify({"error": "File not found", "requested": filename}), 404
+
     return app
 
 
-if __name__ == '__main__':
-    app = create_app()
+# Expose WSGI application instance for production servers (Gunicorn / Render)
+app = create_app()
 
+if __name__ == '__main__':
     host = os.getenv('HOST', '0.0.0.0')
     port = int(os.getenv('PORT', '5000'))
 
     # Run the Flask development server wrapped with Socket.IO
     debug = os.getenv('FLASK_DEBUG', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
-    socketio.run(app, host=host, port=port, debug=debug, use_reloader=False, allow_unsafe_werkzeug=True)
+    socketio_kwargs = {
+        'host': host,
+        'port': port,
+        'debug': debug,
+        'use_reloader': False,
+    }
+    if debug:
+        socketio_kwargs['allow_unsafe_werkzeug'] = True
+
+    socketio.run(app, **socketio_kwargs)
+
 

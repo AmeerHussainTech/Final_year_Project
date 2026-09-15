@@ -11,9 +11,12 @@ import sys
 import os
 from typing import List, Dict, Any
 
-site_packages = os.path.expanduser(r'~\AppData\Roaming\Python\Python314\site-packages')
-if os.path.exists(site_packages) and site_packages not in sys.path:
-    sys.path.insert(0, site_packages)
+# AUDIT-04: Replaced hardcoded Windows developer-machine path with an optional
+# env-variable override. Set CUSTOM_SITE_PACKAGES in .env only when a non-standard
+# Python location needs to be on sys.path. On Render/Docker this block is a no-op.
+_custom_site = os.getenv("CUSTOM_SITE_PACKAGES", "")
+if _custom_site and os.path.isdir(_custom_site) and _custom_site not in sys.path:
+    sys.path.insert(0, _custom_site)
 
 logger = logging.getLogger(__name__)
 

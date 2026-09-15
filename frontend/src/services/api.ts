@@ -112,6 +112,7 @@ export interface SignupResponse {
     created_at: string;
   };
   access_token: string;
+  refresh_token?: string;
 }
 
 export const signup = async (
@@ -129,8 +130,8 @@ export const signup = async (
     });
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.message || 'Signup failed');
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || error.error || 'Signup failed');
     }
 
     return await response.json();
@@ -158,6 +159,7 @@ export interface LoginResponse {
     created_at: string;
   };
   access_token: string;
+  refresh_token?: string;
 }
 
 export const login = async (email: string, password: string): Promise<LoginResponse> => {
@@ -171,8 +173,8 @@ export const login = async (email: string, password: string): Promise<LoginRespo
     });
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.message || 'Login failed');
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || error.error || 'Login failed');
     }
 
     return await response.json();
@@ -200,8 +202,8 @@ export const firebaseLogin = async (idToken: string): Promise<LoginResponse> => 
     });
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.message || 'Firebase login verification failed');
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || error.error || 'Firebase login verification failed');
     }
 
     return await response.json();
@@ -234,7 +236,8 @@ export const getCurrentUser = async (): Promise<UserResponse> => {
     });
 
     if (!response.ok) {
-      throw new Error('Failed to fetch user profile');
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || error.error || 'Failed to fetch user profile');
     }
 
     return await response.json();
@@ -263,7 +266,8 @@ export const analyzeDocument = async (file: File): Promise<AnalysisReport> => {
     });
 
     if (!response.ok) {
-      throw new Error(`Document analysis failed: ${response.statusText}`);
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || error.error || `Document analysis failed: ${response.statusText}`);
     }
 
     return await response.json();
@@ -289,7 +293,8 @@ export const analyzeSpeech = async (text: string, duration_seconds: number): Pro
     });
 
     if (!response.ok) {
-      throw new Error(`Speech analysis failed: ${response.statusText}`);
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.message || error.error || `Speech analysis failed: ${response.statusText}`);
     }
 
     return await response.json();
@@ -314,8 +319,8 @@ export const analyzeAudio = async (file: File, duration_seconds: number): Promis
     });
 
     if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.message || 'Speech audio analysis failed');
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message || err.error || 'Speech audio analysis failed');
     }
 
     return await response.json();
@@ -346,7 +351,8 @@ export const sendChatMessage = async (
     });
 
     if (!response.ok) {
-      throw new Error(`Chat request failed: ${response.statusText}`);
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message || err.error || `Chat request failed: ${response.statusText}`);
     }
 
     return await response.json();
@@ -372,7 +378,8 @@ export const getUserHistory = async (): Promise<{ status: string; reports: Repor
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch history: ${response.statusText}`);
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message || err.error || `Failed to fetch history: ${response.statusText}`);
     }
 
     return await response.json();
@@ -393,7 +400,8 @@ export const getUserHistory = async (): Promise<{ status: string; reports: Repor
  */
 export const healthCheck = async (): Promise<boolean> => {
   try {
-    const response = await fetch('http://localhost:5000/', {
+    const rootUrl = API_BASE_URL.replace(/\/api\/?$/, '') || window.location.origin;
+    const response = await fetch(`${rootUrl}/`, {
       method: 'GET',
     });
     return response.ok;
@@ -414,8 +422,8 @@ export const submitPresentationSession = async (sessionId: string): Promise<{ st
     });
 
     if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.message || 'Failed to compile final live session report');
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message || err.error || 'Failed to compile final live session report');
     }
 
     return await response.json();
@@ -435,8 +443,8 @@ export const getTopicHistory = async (topic: string): Promise<{ status: string; 
     });
 
     if (!response.ok) {
-      const err = await response.json();
-      throw new Error(err.message || 'Failed to retrieve topic history');
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.message || err.error || 'Failed to retrieve topic history');
     }
 
     return await response.json();

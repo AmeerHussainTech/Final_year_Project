@@ -70,7 +70,7 @@ const Login: React.FC = () => {
       const response = await firebaseLogin(idToken);
 
       // Save Flask JWT in AuthContext
-      loginContext(response.user, response.access_token);
+      loginContext(response.user, response.access_token, response.refresh_token);
       setMessage('Login successful! Redirecting to Dashboard...');
 
       setTimeout(() => {
@@ -135,7 +135,7 @@ const Login: React.FC = () => {
 
     try {
       const response = await flaskLogin(loginForm.email.trim(), loginForm.password);
-      loginContext(response.user, response.access_token);
+      loginContext(response.user, response.access_token, response.refresh_token);
       setMessage('Login successful! Redirecting to Dashboard...');
       setTimeout(() => navigate('/analytics'), 800);
     } catch (flaskErr: any) {
@@ -175,7 +175,7 @@ const Login: React.FC = () => {
 
     try {
       const response = await flaskSignup(signupForm.name.trim(), signupForm.email.trim(), signupForm.password);
-      loginContext(response.user, response.access_token);
+      loginContext(response.user, response.access_token, response.refresh_token);
       setMessage('Account created successfully! Redirecting to Dashboard...');
       setTimeout(() => navigate('/analytics'), 800);
     } catch (flaskErr: any) {

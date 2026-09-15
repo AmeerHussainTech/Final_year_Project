@@ -37,6 +37,8 @@ from firebase_admin import credentials, firestore as fs
 _firebase_app = None
 db = None
 
+FIRESTORE_TIMEOUT = 5.0
+
 def _disable_firestore():
     global _use_firestore
     with _store_lock:
@@ -68,8 +70,20 @@ def _init_firebase():
             return
 
         _firebase_app = firebase_admin.initialize_app(cred)
-        db = fs.client()
-        print("[DB OK] Connected to Firebase Firestore")
+
+        # Fast credential probe: verifies token refresh in < 1 second to detect clock skew or bad credentials
+        # If this fails, fail-fast immediately to in-memory store without blocking HTTP requests for 300s
+        try:
+            import google.auth.transport.requests
+            req = google.auth.transport.requests.Request()
+            cred.get_credential().refresh(req)
+            db = fs.client()
+            print("[DB OK] Connected to Firebase Firestore and credentials verified.")
+        except Exception as auth_err:
+            print(f"[DB WARN] Firebase credentials verification failed ({auth_err}).")
+            print("[DB WARN] Clock skew or invalid grant detected. Falling back to local in-memory database.")
+            _disable_firestore()
+            return
 
     except Exception as e:
         print(f"[DB WARN] Firebase initialization error ({str(e)}). Fallback to in-memory database active.")
@@ -96,10 +110,6 @@ def _serialize_dt(dt) -> str | None:
 # User Model
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
-# User Model
-# ─────────────────────────────────────────────────────────────────────────────
-
 class User:
     """User class — maps to Firestore 'users' collection or in-memory fallback."""
 
@@ -114,12 +124,33 @@ class User:
         self.created_at = created_at or datetime.now(timezone.utc)
         self.updated_at = updated_at or datetime.now(timezone.utc)
 
+    def save(self) -> None:
+        """Persist current user state to Firestore and in-memory store."""
+        self.updated_at = datetime.now(timezone.utc)
+        doc = {
+            "name": self.name,
+            "photo_url": self.photo_url,
+            "provider": self.provider,
+            "updated_at": self.updated_at,
+        }
+        with _store_lock:
+            if self.id in _MEMORY_STORE["users"]:
+                _MEMORY_STORE["users"][self.id].update(doc)
+            elif self.uid in _MEMORY_STORE["users"]:
+                _MEMORY_STORE["users"][self.uid].update(doc)
+
+        if _is_firestore_enabled():
+            try:
+                db.collection("users").document(str(self.id)).set(doc, merge=True, timeout=FIRESTORE_TIMEOUT)
+            except Exception as e:
+                logger.warning(f"[DB FALLBACK] Firestore error on User.save: {e}")
+
     @staticmethod
     def get_by_email(email: str) -> "User | None":
         email = email.lower().strip()
         if _is_firestore_enabled():
             try:
-                results = list(db.collection("users").where("email", "==", email).limit(1).stream())
+                results = list(db.collection("users").where("email", "==", email).limit(1).stream(timeout=FIRESTORE_TIMEOUT))
                 for doc in results:
                     d = doc.to_dict()
                     return User(
@@ -152,7 +183,7 @@ class User:
     def get_by_id(user_id: str) -> "User | None":
         if _is_firestore_enabled():
             try:
-                doc = db.collection("users").document(user_id).get()
+                doc = db.collection("users").document(user_id).get(timeout=FIRESTORE_TIMEOUT)
                 d = _to_dict(doc)
                 if d:
                     return User(
@@ -204,7 +235,7 @@ class User:
 
         if _is_firestore_enabled():
             try:
-                db.collection("users").document(user_id).set(doc, merge=True)
+                db.collection("users").document(user_id).set(doc, merge=True, timeout=FIRESTORE_TIMEOUT)
             except Exception as e:
                 logger.warning(f"[DB FALLBACK] Firestore error on User.create_with_id: {e}")
                 _disable_firestore()
@@ -440,21 +471,7 @@ class PresentationSession:
 
     @staticmethod
     def get_by_id(session_id: str) -> "PresentationSession | None":
-        if _is_firestore_enabled():
-            try:
-                doc = db.collection("presentation_sessions").document(session_id).get()
-                d = _to_dict(doc)
-                if d:
-                    return PresentationSession(
-                        id=d.get("id"), user_id=d.get("user_id"),
-                        topic=d.get("topic"), status=d.get("status"),
-                        started_at=d.get("started_at"), ended_at=d.get("ended_at"),
-                        metrics=d.get("metrics")
-                    )
-            except Exception as e:
-                logger.warning(f"[DB FALLBACK] Firestore error on PresentationSession.get_by_id: {e}")
-                _disable_firestore()
-
+        # Fast path: check active in-memory sessions first to prevent socket blocking
         with _store_lock:
             s = _MEMORY_STORE["presentation_sessions"].get(session_id)
 
@@ -465,40 +482,71 @@ class PresentationSession:
                 started_at=s.get("started_at"), ended_at=s.get("ended_at"),
                 metrics=s.get("metrics")
             )
+
+        if _is_firestore_enabled():
+            try:
+                doc = db.collection("presentation_sessions").document(session_id).get()
+                d = _to_dict(doc)
+                if d:
+                    sess = PresentationSession(
+                        id=d.get("id"), user_id=d.get("user_id"),
+                        topic=d.get("topic"), status=d.get("status"),
+                        started_at=d.get("started_at"), ended_at=d.get("ended_at"),
+                        metrics=d.get("metrics")
+                    )
+                    with _store_lock:
+                        _MEMORY_STORE["presentation_sessions"][session_id] = d
+                    return sess
+            except Exception as e:
+                logger.warning(f"[DB FALLBACK] Firestore error on PresentationSession.get_by_id: {e}")
+                _disable_firestore()
+
         return None
 
     def update_metrics(self, key: str, value) -> None:
-        if self.metrics and key in self.metrics:
-            if isinstance(self.metrics[key], list):
-                self.metrics[key].append(value)
-
+        # ISSUE-20 / AUDIT-07: Perform list append and memory store serialization atomically under _store_lock.
+        # The authoritative in-memory state is always updated synchronously here.
         with _store_lock:
+            if self.metrics and key in self.metrics:
+                if isinstance(self.metrics[key], list):
+                    self.metrics[key].append(value)
             if self.id in _MEMORY_STORE["presentation_sessions"]:
                 _MEMORY_STORE["presentation_sessions"][self.id]["metrics"] = self.metrics
 
+        # AUDIT-07: Firestore write is dispatched on a background daemon thread to avoid
+        # blocking the SocketIO event loop during high-frequency real-time streaming
+        # (up to 10 frames/sec per user). Data is already safe in _MEMORY_STORE above.
         if _is_firestore_enabled():
-            try:
-                ref = db.collection("presentation_sessions").document(self.id)
-                ref.update({f"metrics.{key}": fs.ArrayUnion([value])})
-            except Exception as e:
-                logger.warning(f"[DB FALLBACK] Firestore update_metrics error: {e}")
-                _disable_firestore()
+            session_id = self.id
+
+            def _fs_update():
+                try:
+                    ref = db.collection("presentation_sessions").document(session_id)
+                    ref.update({f"metrics.{key}": fs.ArrayUnion([value])})
+                except Exception as e:
+                    logger.debug(f"[DB] Firestore async metric update notice: {e}")
+
+            threading.Thread(target=_fs_update, daemon=True).start()
 
     def increment_metric(self, key: str, val: int = 1) -> None:
-        if self.metrics and key in self.metrics:
-            self.metrics[key] = self.metrics.get(key, 0) + val
-
         with _store_lock:
+            if self.metrics and key in self.metrics:
+                self.metrics[key] = self.metrics.get(key, 0) + val
             if self.id in _MEMORY_STORE["presentation_sessions"]:
                 _MEMORY_STORE["presentation_sessions"][self.id]["metrics"] = self.metrics
 
+        # AUDIT-07: Firestore increment also runs on a background thread to prevent socket stall
         if _is_firestore_enabled():
-            try:
-                ref = db.collection("presentation_sessions").document(self.id)
-                ref.update({f"metrics.{key}": fs.Increment(val)})
-            except Exception as e:
-                logger.warning(f"[DB FALLBACK] Firestore increment_metric error: {e}")
-                _disable_firestore()
+            session_id = self.id
+
+            def _fs_increment():
+                try:
+                    ref = db.collection("presentation_sessions").document(session_id)
+                    ref.update({f"metrics.{key}": fs.Increment(val)})
+                except Exception as e:
+                    logger.warning(f"[DB FALLBACK] Firestore async increment_metric error: {e}")
+
+            threading.Thread(target=_fs_increment, daemon=True).start()
 
     def update_status(self, new_status: str) -> None:
         self.status = new_status

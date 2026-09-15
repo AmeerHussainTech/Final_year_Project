@@ -1,6 +1,9 @@
 """
 Test Backend and Frontend Connectivity
 Verifies that backend APIs are working and frontend can connect
+
+AUDIT-02: All requests now include explicit timeouts to prevent indefinite hangs.
+AUDIT-10: Removed dead test_compare_documents() - /api/compare-documents is deprecated and removed from backend.
 """
 
 import sys
@@ -21,6 +24,11 @@ import requests
 import json
 
 BASE_URL = "http://localhost:5000"
+# Default timeouts (seconds): connect + read
+_TIMEOUT_SHORT = 5.0
+_TIMEOUT_MEDIUM = 15.0
+_TIMEOUT_LONG = 30.0
+
 
 def test_health_check():
     """Test health check endpoint"""
@@ -28,7 +36,7 @@ def test_health_check():
     print("1️⃣  Testing Health Check Endpoint")
     print("=" * 60)
     try:
-        response = requests.get(f"{BASE_URL}/")
+        response = requests.get(f"{BASE_URL}/", timeout=_TIMEOUT_SHORT)
         if response.status_code == 200:
             print(f"✅ Status Code: {response.status_code}")
             print(f"✅ Response: {response.json()}")
@@ -53,8 +61,12 @@ def test_analyze_document():
         # Create a test file
         test_content = b"This is a test document for analysis."
         files = {'file': ('test.txt', test_content)}
-        
-        response = requests.post(f"{BASE_URL}/api/analyze-document", files=files)
+
+        response = requests.post(
+            f"{BASE_URL}/api/analyze-document",
+            files=files,
+            timeout=_TIMEOUT_LONG,
+        )
         if response.status_code == 200:
             print(f"✅ Status Code: {response.status_code}")
             result = response.json()
@@ -83,11 +95,12 @@ def test_analyze_speech():
             "text": "This is a test speech. Um, I like to, you know, basically explain this. Actually, this is working great.",
             "duration_seconds": 15
         }
-        
+
         response = requests.post(
             f"{BASE_URL}/api/analyze-speech",
             json=payload,
-            headers={"Content-Type": "application/json"}
+            headers={"Content-Type": "application/json"},
+            timeout=_TIMEOUT_MEDIUM,
         )
         if response.status_code == 200:
             print(f"✅ Status Code: {response.status_code}")
@@ -119,11 +132,12 @@ def test_practice_chat():
             "history": [],
             "contextReport": {}
         }
-        
+
         response = requests.post(
             f"{BASE_URL}/api/practice-chat",
             json=payload,
-            headers={"Content-Type": "application/json"}
+            headers={"Content-Type": "application/json"},
+            timeout=_TIMEOUT_MEDIUM,
         )
         if response.status_code == 200:
             print(f"✅ Status Code: {response.status_code}")
@@ -142,49 +156,16 @@ def test_practice_chat():
         print(f"❌ FAIL: Could not test practice chat\n")
         return False
 
-
-def test_compare_documents():
-    """Test document comparison endpoint"""
-    print("=" * 60)
-    print("5️⃣  Testing Document Comparison Endpoint")
-    print("=" * 60)
-    try:
-        payload = {
-            "v1_text": "This is a draft version of slide 1. Speaker says um like basically.",
-            "v2_text": "This is a polished version of slide 1, presenting clinical outcomes.",
-            "v1_score": 45,
-            "v2_score": 80,
-            "filename": "clinical_outcomes.pdf"
-        }
-        
-        response = requests.post(
-            f"{BASE_URL}/api/compare-documents",
-            json=payload,
-            headers={"Content-Type": "application/json"}
-        )
-        if response.status_code == 200:
-            print(f"✅ Status Code: {response.status_code}")
-            result = response.json()
-            print(f"✅ Response Keys: {list(result.keys())}")
-            print(f"✅ Score Difference: {result.get('score_difference', 'N/A')}")
-            print(f"✅ Synthesis: {result.get('synthesis_summary', 'N/A')[:100]}...")
-            print("✅ PASS: Document comparison endpoint working\n")
-            return True
-        else:
-            print(f"❌ Status Code: {response.status_code}")
-            print(f"❌ Response: {response.text}")
-            print(f"❌ FAIL: Document comparison failed\n")
-            return False
-    except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        print(f"❌ FAIL: Could not test document comparison\n")
-        return False
+# NOTE: test_compare_documents() removed (AUDIT-10).
+# The /api/compare-documents endpoint has been deprecated and removed from the
+# backend (phase_two.py) while the frontend comparison wizard was also removed.
+# Keeping this test would produce a guaranteed 404 failure on every run.
 
 
 def check_frontend_config():
     """Check frontend configuration"""
     print("=" * 60)
-    print("6️⃣  Checking Frontend Configuration")
+    print("5️⃣  Checking Frontend Configuration")
     print("=" * 60)
     try:
         with open("frontend/.env", "r") as f:
@@ -215,7 +196,6 @@ def main():
     results.append(("Document Analysis", test_analyze_document()))
     results.append(("Speech Analysis", test_analyze_speech()))
     results.append(("Practice Chat", test_practice_chat()))
-    results.append(("Document Comparison", test_compare_documents()))
     results.append(("Frontend Config", check_frontend_config()))
 
     print("=" * 60)
@@ -223,19 +203,42 @@ def main():
     print("=" * 60)
     passed = sum(1 for _, result in results if result)
     total = len(results)
-    
+
     for test_name, result in results:
         status = "✅ PASS" if result else "❌ FAIL"
         print(f"{status} - {test_name}")
-    
+
     print(f"\nTotal: {passed}/{total} tests passed")
-    
+
     if passed == total:
         print("\n🎉 All connectivity tests passed! Backend and Frontend are properly connected!")
     else:
         print(f"\n⚠️  {total - passed} test(s) failed. Please check the errors above.")
-    
+
     print("\n")
+
+
+try:
+    import pytest
+
+    @pytest.fixture
+    def app():
+        from main import create_app
+        test_app = create_app()
+        test_app.config['TESTING'] = True
+        return test_app
+
+    @pytest.fixture
+    def client(app):
+        return app.test_client()
+
+    def test_flask_health_endpoint(client):
+        res = client.get('/')
+        assert res.status_code == 200
+        data = res.get_json()
+        assert data.get('status') == 'running'
+except ImportError:
+    pass
 
 
 if __name__ == "__main__":

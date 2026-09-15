@@ -7,6 +7,7 @@ import tempfile
 from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request
+from flask_jwt_extended import jwt_required
 from werkzeug.exceptions import RequestEntityTooLarge
 
 from services.download_service import (
@@ -28,8 +29,9 @@ question_generator_bp = Blueprint(
 )
 
 
-def _error(message: str, status: int):
-    return jsonify({'success': False, 'message': message}), status
+def _error(message: str, status: int, error: str = None):
+    error_code = error or ("BadRequest" if status == 400 else ("NotFound" if status == 404 else ("PayloadTooLarge" if status == 413 else ("ServiceUnavailable" if status == 502 else "InternalError"))))
+    return jsonify({'success': False, 'error': error_code, 'message': message}), status
 
 
 @question_generator_bp.errorhandler(RequestEntityTooLarge)
@@ -37,6 +39,7 @@ def handle_upload_too_large(_exception):
     return _error(
         f'File too large. Maximum allowed size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.',
         413,
+        'PayloadTooLarge',
     )
 
 
@@ -64,6 +67,8 @@ def _save_validated_upload(file_storage, original_filename: str) -> str:
 
 
 @question_generator_bp.route('/generate', methods=['POST'])
+@jwt_required(optional=True)
+@rate_limit(limit_authenticated=15, limit_guest=3)
 def generate_questions():
     """Generate viva/thesis-defense questions from an uploaded PPTX or PDF.
 
@@ -99,13 +104,9 @@ def generate_questions():
                 400,
             )
 
-        # ── Read optional num_questions ────────────────────────────────
+        # ── Read optional num_questions (ISSUE-12: clamp between 3 and 30) ───
         try:
-            num_questions = int(request.form.get('num_questions', 10))
-            if num_questions < 1:
-                num_questions = 1
-            elif num_questions > 50:
-                num_questions = 50
+            num_questions = max(3, min(30, int(request.form.get('num_questions', 10))))
         except (TypeError, ValueError):
             num_questions = 10
 
@@ -126,7 +127,11 @@ def generate_questions():
         elapsed = (datetime.now(timezone.utc) - started).total_seconds()
 
         if not result.get('success', False):
-            return jsonify(result), 400
+            return jsonify({
+                'success': False,
+                'error': result.get('error', 'QuestionGenerationError'),
+                'message': result.get('message', 'Failed to generate questions.')
+            }), 400
 
         response = {
             'success': True,

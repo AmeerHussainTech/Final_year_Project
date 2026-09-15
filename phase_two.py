@@ -6,7 +6,9 @@ Role: Analyze uploaded documents using local text extraction and Google Gemini 1
 import os
 import tempfile
 import json
+import logging
 from datetime import datetime, timezone
+import uuid
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from dotenv import load_dotenv
@@ -14,6 +16,9 @@ import pypdf
 import docx
 from pptx import Presentation as PptxPresentation
 from models import Upload, Report
+from services.text_extractor import validate_file_content
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -129,13 +134,14 @@ def analyze_document():
     if guest_check:
         return guest_check
 
-    temp_file_path = None
+    permanent_file_path = None
     
     try:
         # ===== STEP 1: FILE VALIDATION =====
         if 'file' not in request.files:
             return jsonify({
-                "error": "No file provided",
+                "success": False,
+                "error": "NoFileProvided",
                 "message": "Please upload a file with key 'file'"
             }), 400
         
@@ -143,7 +149,8 @@ def analyze_document():
         
         if file.filename == '':
             return jsonify({
-                "error": "Empty file",
+                "success": False,
+                "error": "EmptyFile",
                 "message": "Please select a file to upload"
             }), 400
         
@@ -153,55 +160,53 @@ def analyze_document():
         
         if file_ext not in ALLOWED_EXTENSIONS:
             return jsonify({
-                "error": "Unsupported file format",
+                "success": False,
+                "error": "UnsupportedFileFormat",
                 "message": f"Supported formats for extraction: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
             }), 400
         
-        # ===== STEP 2: SECURE TEMPORARY FILE HANDLING =====
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
-            temp_file_path = temp_file.name
-            file.save(temp_file_path)
+        # ===== STEP 2: SECURE PERMANENT FILE STORAGE (ISSUE-14) =====
+        from werkzeug.utils import secure_filename
+        upload_folder = os.path.join(os.getcwd(), 'instance', 'uploads', str(uuid.uuid4()))
+        os.makedirs(upload_folder, exist_ok=True)
+        safe_filename = secure_filename(file.filename) or f"document{file_ext}"
+        permanent_file_path = os.path.join(upload_folder, safe_filename)
+        file.save(permanent_file_path)
+
+        # ===== STEP 2.1: MAGIC BYTE VERIFICATION (ISSUE-13) =====
+        try:
+            validate_file_content(permanent_file_path, file.filename)
+        except ValueError as val_err:
+            try:
+                os.remove(permanent_file_path)
+            except OSError:
+                pass
+            return jsonify({
+                "success": False,
+                "error": "InvalidFileSignature",
+                "message": str(val_err)
+            }), 400
             
         # ===== STEP 3: EXTRACT TEXT LOCALLY =====
-        print(f"📄 Extracting text from local file: {file.filename}")
+        logger.info("Extracting text from uploaded file: %s", file.filename)
         try:
-            extracted_text = extract_text_from_file(temp_file_path, file_ext)
+            extracted_text = extract_text_from_file(permanent_file_path, file_ext)
         except Exception as e:
-            print(f"⚠️ Text extraction failed ({str(e)}). Using demo fallback text.")
+            logger.error("Text extraction failed for %s: %s", file.filename, e)
             extracted_text = ""
         
-        if not extracted_text:
-            print("⚠️ Extracted text is empty or failed. Using demo fallback text.")
-            # Use a friendly default topic based on the filename if possible
-            filename_lower = file.filename.lower()
-            if "healthcare" in filename_lower or "medical" in filename_lower or "health" in filename_lower:
-                extracted_text = (
-                    "AI IN HEALTHCARE - PRESENTATION TRANSCRIPT\n\n"
-                    "Slide 1: Introduction\n"
-                    "Today we are discussing Artificial Intelligence in Healthcare. AI is transforming diagnostics, patient care, and administrative tasks.\n\n"
-                    "Slide 2: Clinical Diagnostics\n"
-                    "Machine learning models can analyze medical imaging (X-rays, MRIs, CT scans) to detect anomalies with accuracy comparable to human radiographers.\n\n"
-                    "Slide 3: Challenges & Limitations\n"
-                    "Key challenges include data privacy, security, and algorithmic bias. Models trained on limited demographics may not generalize well.\n\n"
-                    "Slide 4: The Human Element\n"
-                    "AI is a decision support tool, not a replacement for medical professionals. The final clinical judgment remains with the doctor.\n\n"
-                    "Slide 5: Conclusion & Future Outlook\n"
-                    "The future of healthcare involves doctor-AI collaboration to improve patient outcomes and reduce administrative burnout."
-                )
-            else:
-                extracted_text = (
-                    f"PRESENTATION TRANSCRIPT: {os.path.splitext(file.filename)[0]}\n\n"
-                    "Slide 1: Overview\n"
-                    "This presentation covers the key objectives, methodology, and results of our project.\n\n"
-                    "Slide 2: Problem Statement\n"
-                    "Existing workflows are manual and slow. We need an automated AI-driven solution to optimize performance.\n\n"
-                    "Slide 3: Proposed Architecture\n"
-                    "Our solution integrates a clean React frontend with a Flask API and MongoDB database.\n\n"
-                    "Slide 4: Key Results\n"
-                    "Testing shows a 40% reduction in processing time and improved user satisfaction metrics.\n\n"
-                    "Slide 5: Questions & Answers\n"
-                    "Thank you for listening. We welcome any questions from the panel."
-                )
+        if not extracted_text or not extracted_text.strip():
+            logger.warning("Extracted text is empty or unreadable for: %s", file.filename)
+            try:
+                os.remove(permanent_file_path)
+            except OSError:
+                pass
+            return jsonify({
+                "success": False,
+                "error": "ExtractionFailed",
+                "message": "Could not extract readable text from the uploaded file. "
+                           "Ensure the document contains text and is not password-protected, corrupted, or empty."
+            }), 422
             
         # ===== STEP 4: GENERATE 7Cs ANALYSIS & SUB-ANALYZERS =====
         from ai_evaluator import evaluate_7cs
@@ -216,9 +221,9 @@ def analyze_document():
         if file_ext == '.pptx':
             try:
                 from services.ppt_processor import extract_slides
-                slides_data = extract_slides(temp_file_path)
+                slides_data = extract_slides(permanent_file_path)
             except Exception as _e:
-                print(f"⚠️ PPTX slide extraction fallback: {_e}")
+                logger.warning("PPTX slide extraction fallback: %s", _e)
                 slides_data = build_slides_from_text(extracted_text)
         else:
             slides_data = build_slides_from_text(extracted_text)
@@ -226,44 +231,63 @@ def analyze_document():
         try:
             import dataclasses
             from services.analysis.statistics import compute_presentation_statistics
-            from services.analysis.design import DesignAnalyzer
-            from services.analysis.consistency import ConsistencyAnalyzer
-            from services.analysis.accessibility import AccessibilityAnalyzer
-            from services.analysis.storytelling import StorytellingAnalyzer
-            from services.analysis.speaker import SpeakerAnalyzer
-            from services.analysis.duplicate_detector import DuplicateDetector
+            from services.analysis.visuals import analyze_visual_balance
+            from services.analysis.sentiment import analyze_sentiment_and_tone
+            from services.analysis.pacing import analyze_pacing_and_transitions
+            from services.analysis.delivery import analyze_delivery_impact
+            from services.analysis.narrative import analyze_narrative_structure
 
+            # 1. Structural Statistics
             stats = compute_presentation_statistics(slides_data)
-            design_res = DesignAnalyzer().analyze(slides_data)
-            consistency_res = ConsistencyAnalyzer().analyze(slides_data)
-            accessibility_res = AccessibilityAnalyzer().analyze(slides_data)
-            storytelling_res = StorytellingAnalyzer().analyze(slides_data)
-            speaker_res = SpeakerAnalyzer().analyze(slides_data)
-            duplicate_res = DuplicateDetector().analyze(slides_data)
+            stats_dict = dataclasses.asdict(stats)
+            analysis_json["presentation_statistics"] = stats_dict
 
-            analysis_json["presentation_statistics"] = dataclasses.asdict(stats)
-            analysis_json["design_analysis"] = design_res
-            analysis_json["consistency_analysis"] = consistency_res
-            analysis_json["accessibility_analysis"] = accessibility_res
-            analysis_json["storytelling_analysis"] = storytelling_res
-            analysis_json["speaker_analysis"] = speaker_res
-            analysis_json["duplicate_detection"] = duplicate_res
-        except Exception as _ae:
-            print(f"⚠️ Sub-analyzers execution notice: {_ae}")
+            # 2. Visual Balance
+            visuals = analyze_visual_balance(slides_data)
+            visuals_dict = dataclasses.asdict(visuals)
+            analysis_json["visual_balance"] = visuals_dict
+
+            # 3. Sentiment & Tone
+            sentiment = analyze_sentiment_and_tone(extracted_text)
+            analysis_json["sentiment_analysis"] = dataclasses.asdict(sentiment)
+
+            # 4. Pacing & Transitions
+            pacing = analyze_pacing_and_transitions(slides_data)
+            analysis_json["pacing_analysis"] = dataclasses.asdict(pacing)
+
+            # 5. Delivery Impact
+            delivery = analyze_delivery_impact(extracted_text)
+            analysis_json["delivery_impact"] = dataclasses.asdict(delivery)
+
+            # 6. Narrative Structure
+            narrative = analyze_narrative_structure(slides_data)
+            analysis_json["narrative_structure"] = dataclasses.asdict(narrative)
+
+            # Inject top-level convenience metrics
+            analysis_json["total_slides"] = stats_dict.get("total_slides", len(slides_data))
+            analysis_json["total_words"] = stats_dict.get("total_words", len(extracted_text.split()))
+            analysis_json["reading_time_minutes"] = stats_dict.get("estimated_duration_minutes", 0)
+            analysis_json["slides"] = slides_data
+
+        except Exception as sub_err:
+            logger.warning("Deep sub-analyzers encountered a non-fatal error: %s", sub_err)
+            analysis_json["total_slides"] = len(slides_data)
+            analysis_json["slides"] = slides_data
 
         # Inject original text and metadata
         analysis_json["original_text"] = extracted_text
+        analysis_json["success"] = True
         analysis_json["status"] = "success"
         analysis_json["analysis_timestamp"] = datetime.now(timezone.utc).isoformat()
         
-        # ===== STEP 7: SAVE TO DATABASE (MongoDB) =====
+        # ===== STEP 7: SAVE TO DATABASE (Firestore / In-Memory) =====
         user_id = get_jwt_identity() or "guest"
         
-        # Create upload metadata record
+        # Create upload metadata record with permanent file path (ISSUE-14)
         upload_record = Upload.create(
             filename=file.filename,
             mime_type=file.mimetype or f"application/{file_ext[1:]}",
-            file_path=temp_file_path,
+            file_path=permanent_file_path,
             user_id=user_id
         )
         
@@ -275,114 +299,31 @@ def analyze_document():
             upload_id=upload_record.id
         )
         
-        print(f"✅ Full multi-dimensional analysis complete and saved to MongoDB for: {file.filename}")
+        logger.info("Full multi-dimensional analysis complete and saved for: %s", file.filename)
         return jsonify(analysis_json), 200
         
     except json.JSONDecodeError as e:
-        print(f"❌ JSON Parsing Error: {str(e)}")
+        logger.error("JSON Parsing Error during document analysis: %s", e)
         return jsonify({
-            "error": "Invalid JSON response from AI model",
+            "success": False,
+            "error": "AIModelError",
             "message": "The AI model returned malformed JSON. Please try again.",
             "details": str(e)
         }), 500
         
     except ValueError as e:
-        print(f"⚠️ ValueError during document analysis: {str(e)}")
+        logger.warning("ValueError during document analysis: %s", e)
         return jsonify({
-            "error": "Invalid input file",
+            "success": False,
+            "error": "InvalidInputFile",
             "message": str(e)
         }), 400
         
     except Exception as e:
-        print(f"❌ Error during document analysis: {str(e)}")
+        logger.error("Error during document analysis: %s", e, exc_info=True)
         return jsonify({
-            "error": "Document analysis failed",
+            "success": False,
+            "error": "AnalysisFailed",
             "message": "An error occurred while analyzing your document.",
-            "details": str(e)
-        }), 500
-        
-    finally:
-        # ===== STEP 8: CLEANUP LOCAL TEMP FILE =====
-        try:
-            if temp_file_path and os.path.exists(temp_file_path):
-                print(f"🗑️  Deleting local temporary file...")
-                os.remove(temp_file_path)
-                print(f"✅ Local temporary file deleted")
-        except Exception as e:
-            print(f"⚠️  Warning: Could not delete local temp file: {str(e)}")
-
-
-@phase_two_bp.route('/compare-documents', methods=['POST'])
-@jwt_required(optional=True)
-def compare_documents():
-    """
-    Compare Version 1 and Version 2 of a presentation.
-    Generates an AI progress report comparing improvements and remaining issues.
-    """
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({
-                "error": "Invalid request",
-                "message": "Missing JSON body"
-            }), 400
-            
-        v1_text = data.get('v1_text', '').strip()
-        v2_text = data.get('v2_text', '').strip()
-        v1_score = int(data.get('v1_score', 0))
-        v2_score = int(data.get('v2_score', 0))
-        filename = data.get('filename', 'presentation.pdf')
-        
-        if not v1_text or not v2_text:
-            return jsonify({
-                "error": "Missing texts",
-                "message": "Both v1_text and v2_text must be provided for comparison"
-            }), 400
-            
-        # ===== STEP 1: CONSTRUCT AI PROMPT =====
-        compare_prompt = f"""
-Compare these two versions of a presentation and generate a structured JSON progress report.
-Identify specific areas where the presenter improved grammar, formatting, clarity, structure, or content in Version 2 compared to Version 1. Also point out any remaining issues that still need attention.
-
-JSON Schema output:
-{{
-  "score_difference": <integer (Version 2 score minus Version 1 score)>,
-  "key_improvements": [
-    "<detailed improvement 1, e.g. Fixed spelling error in slide 2>",
-    "<detailed improvement 2, e.g. Removed passive fillers and simplified slide 3>",
-    "<detailed improvement 3>"
-  ],
-  "remaining_issues": [
-    "<issue 1 still present in Version 2, e.g. slide 4 is still too wordy>",
-    "<issue 2>"
-  ],
-  "synthesis_summary": "<1-2 paragraph description of the user's progress and coaching encouragement>"
-}}
-
-Version 1 Text:
-{v1_text}
-
-Version 2 Text:
-{v2_text}
-"""
-        
-        # ===== STEP 2: GENERATE PROGRESS COMPARISON REPORT =====
-        from ai_evaluator import compare_documents
-        comparison_json = compare_documents(
-            v1_text=v1_text,
-            v2_text=v2_text,
-            v1_score=v1_score,
-            v2_score=v2_score,
-            filename=filename
-        )
-        
-        print("✅ Comparison report generated successfully")
-        return jsonify(comparison_json), 200
-        
-    except Exception as e:
-        print(f"❌ Error during document comparison: {str(e)}")
-        return jsonify({
-            "error": "Comparison failed",
-            "message": "An error occurred while comparing the two versions.",
             "details": str(e)
         }), 500

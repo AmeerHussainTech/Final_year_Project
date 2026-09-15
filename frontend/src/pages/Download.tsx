@@ -26,7 +26,7 @@ const downloadOptions: DownloadOption[] = [
     fileSize: '84.5 MB',
     format: '.exe (Installer)',
     icon: '🪟',
-    downloadUrl: 'https://fyp-integration-c620f.web.app/downloads/Presenova-Setup-1.1.0.exe',
+    downloadUrl: '/downloads/Presenova-Setup-1.1.0.exe',
     features: [
       'Native Windows setup with desktop & start menu shortcuts',
       'Offline Classical ML & RAG vector search processing',
@@ -44,7 +44,7 @@ const downloadOptions: DownloadOption[] = [
     fileSize: '89.2 MB',
     format: '.dmg (Apple Silicon & Intel)',
     icon: '🍎',
-    downloadUrl: 'https://fyp-integration-c620f.web.app/downloads/Presenova-1.1.0.dmg',
+    downloadUrl: '/downloads/Presenova-1.1.0.dmg',
     features: [
       'Universal build supporting M1/M2/M3 & Intel Macs',
       'Seamless macOS menu bar & hiddenInset titlebar design',
@@ -63,7 +63,7 @@ const downloadOptions: DownloadOption[] = [
     fileSize: '41.8 MB',
     format: '.apk (Package)',
     icon: '🤖',
-    downloadUrl: 'https://fyp-integration-c620f.web.app/downloads/app-release.apk',
+    downloadUrl: '/downloads/app-release.apk',
     features: [
       'On-the-go mobile presentation rehearsal & camera tracking',
       'Real-time WebSocket audio streaming & WPM pace monitor',

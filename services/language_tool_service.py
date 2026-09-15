@@ -16,6 +16,7 @@ Environment Variables:
 
 import logging
 import os
+import time
 import requests
 from typing import Optional
 
@@ -33,8 +34,8 @@ LANGUAGETOOL_USERNAME = os.getenv('LANGUAGETOOL_USERNAME', '').strip()
 # Cloud API is always available — no Java needed
 _CLOUD_ENABLED = os.getenv('ENABLE_GRAMMAR_CHECK', '1').strip().lower() not in {'0', 'false', 'no', 'off'}
 
-# Request timeout (seconds)
-_TIMEOUT = 15
+# Request timeout (seconds) — reduced to 4s to prevent blocking HTTP endpoints
+_TIMEOUT = 4
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -73,24 +74,30 @@ def check_grammar(text: str, language: str = 'en-US') -> list[dict]:
         payload['username'] = LANGUAGETOOL_USERNAME
 
     # ── Call LanguageTool Cloud API ───────────────────────────────────────────
-    try:
-        response = requests.post(
-            f'{LANGUAGETOOL_API_URL}/check',
-            data=payload,
-            timeout=_TIMEOUT,
-            headers={'Accept': 'application/json'}
-        )
-        response.raise_for_status()
-        data = response.json()
-    except requests.exceptions.Timeout:
-        logger.warning('[language_tool_service] LanguageTool API timed out. Skipping grammar pre-pass.')
-        return []
-    except requests.exceptions.ConnectionError:
-        logger.warning('[language_tool_service] LanguageTool API unreachable. Skipping grammar pre-pass.')
-        return []
-    except Exception as exc:
-        logger.warning(f'[language_tool_service] Grammar check failed: {exc}')
-        return []
+    data = {}
+    for attempt in range(2):
+        try:
+            response = requests.post(
+                f'{LANGUAGETOOL_API_URL}/check',
+                data=payload,
+                timeout=_TIMEOUT,
+                headers={'Accept': 'application/json'}
+            )
+            response.raise_for_status()
+            data = response.json()
+            break
+        except requests.exceptions.Timeout:
+            if attempt == 0:
+                logger.info('[language_tool_service] LanguageTool API timeout, retrying immediately...')
+            else:
+                logger.warning('[language_tool_service] LanguageTool API timed out after 2 attempts. Skipping grammar pre-pass.')
+                return []
+        except requests.exceptions.ConnectionError:
+            logger.warning('[language_tool_service] LanguageTool API unreachable. Skipping grammar pre-pass.')
+            return []
+        except Exception as exc:
+            logger.warning(f'[language_tool_service] Grammar check failed: {exc}')
+            return []
 
     # ── Parse response ────────────────────────────────────────────────────────
     matches = data.get('matches', [])

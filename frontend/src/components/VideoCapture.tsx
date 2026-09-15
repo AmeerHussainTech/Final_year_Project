@@ -3,17 +3,20 @@ import React, { useEffect, useState } from 'react';
 interface VideoCaptureProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   isStreaming: boolean;
+  onError?: (errorMsg: string) => void;
 }
 
-const VideoCapture: React.FC<VideoCaptureProps> = ({ videoRef, isStreaming }) => {
+const VideoCapture: React.FC<VideoCaptureProps> = ({ videoRef, isStreaming, onError }) => {
   const [cameraActive, setCameraActive] = useState(false);
   const [stream, setStream] = useState<MediaStream | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     let localStream: MediaStream | null = null;
 
     if (isStreaming) {
+      setErrorMessage(null);
       navigator.mediaDevices
         .getUserMedia({ video: { width: 640, height: 480 }, audio: false })
         .then((mediaStream) => {
@@ -34,6 +37,11 @@ const VideoCapture: React.FC<VideoCaptureProps> = ({ videoRef, isStreaming }) =>
         .catch((err) => {
           console.error('Error accessing webcam:', err);
           setCameraActive(false);
+          const msg = err?.message || 'Camera access was denied or device is in use by another app.';
+          setErrorMessage(msg);
+          if (onError) {
+            onError(msg);
+          }
         });
     } else {
       if (stream) {
@@ -76,6 +84,11 @@ const VideoCapture: React.FC<VideoCaptureProps> = ({ videoRef, isStreaming }) =>
       {cameraActive && isStreaming && (
         <div style={badgeStyle}>
           <span style={dotStyle}></span> LIVE
+        </div>
+      )}
+      {errorMessage && (
+        <div style={{ position: 'absolute', bottom: '12px', left: '12px', right: '12px', background: 'rgba(239, 68, 68, 0.9)', color: '#ffffff', padding: '8px 12px', borderRadius: '6px', fontSize: '12px', zIndex: 10 }}>
+          ⚠️ {errorMessage}
         </div>
       )}
     </div>

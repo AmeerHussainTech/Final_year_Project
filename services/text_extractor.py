@@ -47,6 +47,23 @@ def validate_file_content(file_path: str, filename: str) -> None:
             with open(file_path, 'rb') as stream:
                 if stream.read(5) != b'%PDF-':
                     raise ValueError('The uploaded file is not a valid PDF document.')
+        elif ext == '.docx':
+            if not zipfile.is_zipfile(file_path):
+                raise ValueError('The uploaded file is not a valid Word (.docx) document.')
+            with zipfile.ZipFile(file_path) as archive:
+                names = set(archive.namelist())
+                if 'word/document.xml' not in names and '[Content_Types].xml' not in names:
+                    raise ValueError('The uploaded file is not a valid Word (.docx) document.')
+        elif ext == '.txt':
+            with open(file_path, 'rb') as stream:
+                content = stream.read(1024)
+                if b'\x00' in content:
+                    raise ValueError('The uploaded file contains binary characters and is not a valid text file.')
+        elif ext == '.doc':
+            with open(file_path, 'rb') as stream:
+                header = stream.read(8)
+                if not header.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'):
+                    raise ValueError('The uploaded file is not a valid legacy Word (.doc) document.')
         else:
             raise ValueError(f"Unsupported file type for validation: '{ext}'")
     except (OSError, zipfile.BadZipFile) as exc:

@@ -88,24 +88,24 @@ def run_rewrite_pipeline(
     file_size = os.path.getsize(temp_file_path)
     validate_upload_size(file_size)
     validate_file_content(temp_file_path, original_filename)
-    steps = ['File validated']
+    steps = ['Validating file integrity and format']
 
     # ── Step 1: Extract slides and metadata ────────────────────────────
     slides = extract_slides(temp_file_path)
     metadata = get_presentation_metadata(temp_file_path)
     slide_count = len(slides)
-    steps.append(f'Extracted {slide_count} slides')
+    steps.append(f'Extracting text from {slide_count} slides & reading metadata')
 
     # ── Step 2: Extract text for analysis ──────────────────────────────
     extracted_text = get_all_text_for_analysis(temp_file_path, original_filename)
-    steps.append('Text extracted for analysis')
+    steps.append('Text extraction complete — preparing for analysis')
 
     # ── Step 3: Grammar pre-check ──────────────────────────────────────
     grammar_matches = check_grammar(extracted_text)
     grammar_summary = summarise_grammar_issues(grammar_matches)
     steps.append(
-        f'Grammar pre-analysis: {len(grammar_matches)} issues detected'
-        if grammar_matches else 'Grammar pre-analysis complete'
+        f'Grammar & spelling pre-check: {len(grammar_matches)} issue(s) detected — will be addressed in rewrite'
+        if grammar_matches else 'Grammar & spelling pre-check passed — no issues found'
     )
 
     # ── Step 4: Initialize providers and analyzers ─────────────────────
@@ -134,17 +134,17 @@ def run_rewrite_pipeline(
 
     # ── Step 5: Holistic presentation analysis ─────────────────────────
     presentation_context = holistic_analyzer.analyze(slides)
-    steps.append('Holistic presentation analysis complete')
+    steps.append('Running holistic presentation analysis — evaluating structure, narrative, and topic coherence')
 
     # ── Step 6: Quality analysis ───────────────────────────────────────
     quality_scores = per_slide_analyzer.analyze_presentation(
         extracted_text, original_filename, mode
     )
-    steps.append('AI quality analysis complete')
+    steps.append('Running 7Cs semantic quality analysis — evaluating clarity, conciseness, correctness, completeness')
 
     # ── Step 7: Additional analyses (design, storytelling, etc.) ───────
     stats = compute_presentation_statistics(slides)
-    steps.append('Presentation statistics computed')
+    steps.append('Computing readability indices & slide-by-slide statistics')
 
     design_analysis = design_analyzer.analyze(slides)
     storytelling_analysis = storytelling_analyzer.analyze(slides)
@@ -152,7 +152,7 @@ def run_rewrite_pipeline(
     duplicate_analysis = duplicate_detector.analyze(slides)
     accessibility_analysis = accessibility_analyzer.analyze(slides)
     speaker_analysis = speaker_analyzer.analyze(slides)
-    steps.append('Advanced analyses complete')
+    steps.append('Checking design consistency, storytelling arc, accessibility compliance, and speaker notes quality')
 
     # ── Step 8: Smart filter optimization ──────────────────────────────
     token_savings = smart_filter.estimate_token_savings(slides)
@@ -166,12 +166,12 @@ def run_rewrite_pipeline(
         slides, grammar_summary, presentation_context,
         focus_items=quality_scores.get('recommendations', []),
     )
-    steps.append(f'{len(rewritten_slides)} slides rewritten')
+    steps.append(f'Generating AI-enhanced rewrites for {len(rewritten_slides)} slides with tone & 7Cs alignment')
 
     # ── Step 10: Validate rewritten content ────────────────────────────
     semantic_result = semantic_validator.validate(slides, rewritten_slides)
     structural_result = structural_validator.validate_slides(slides, rewritten_slides)
-    steps.append('Validation complete')
+    steps.append('Running semantic coherence & structural preservation validation')
 
     # ── Step 11: Compute final assessment ──────────────────────────────
     final_assessment = final_validator.compute_final_assessment(
@@ -186,7 +186,7 @@ def run_rewrite_pipeline(
             'topic': presentation_context.get('overall_topic', ''),
         },
     )
-    steps.append('Final assessment complete')
+    steps.append('Computing final quality assessment & improvement delta scores')
 
     # ── Step 12: Generate reports ─────────────────────────────────────
     executive_summary = exec_summary_gen.generate(final_assessment, {
@@ -200,7 +200,7 @@ def run_rewrite_pipeline(
         design_analysis, storytelling_analysis,
         consistency_analysis, accessibility_analysis, speaker_analysis,
     )
-    steps.append('Reports generated')
+    steps.append('Building executive summary, analytics dashboard, and prioritized recommendations')
 
     # ── Step 13: Save PPTX output ─────────────────────────────────────
     output_folder = ensure_download_folder()

@@ -5,6 +5,7 @@ import {
   pollProgress,
   fetchSlideReport,
   getReportPdfUrl,
+  getDownloadUrl,
   MAX_PRESENTATION_UPLOAD_BYTES,
   PresentationAnalysisResponse,
   PresentationRewriterResponse,
@@ -536,7 +537,7 @@ const PresentationRewriter: React.FC = () => {
                 </ul>
               )}
               <div className="pr-download-actions">
-                <a id="pr-download-btn" className="pr-btn pr-btn-download" href={result.download_url} target="_blank" rel="noreferrer" download><span>⬇️</span> Download Improved PPTX</a>
+                <a id="pr-download-btn" className="pr-btn pr-btn-download" href={getDownloadUrl(result.download_url)} target="_blank" rel="noreferrer" download><span>⬇️</span> Download Improved PPTX</a>
                 <button id="pr-compare-btn" className="pr-btn pr-btn-secondary" onClick={handleLoadSlideReport} disabled={loadingReport}>
                   {loadingReport ? <><span className="pr-spinner-sm" /> Loading…</> : <><span>📋</span> Compare Changes</>}
                 </button>

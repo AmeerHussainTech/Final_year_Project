@@ -4,17 +4,36 @@ Centralized Google Gemini 1.5 Flash analysis and smart fallbacks for all modules
 Now includes LanguageTool Cloud grammar pre-pass to enrich the 7Cs analysis.
 """
 
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 import os
 import json
 import random
 import re
+# AUDIT-06: Suppress FutureWarning from the legacy google.generativeai SDK before import.
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, message=r"(?s).*google\.generativeai.*")
 import google.generativeai as genai
+import logging
 from dotenv import load_dotenv
 from services.language_tool_service import (
     check_grammar,
     summarise_grammar_issues,
     grammar_score as lt_grammar_score,
 )
+from services.ai.scoring_utils import clamp_score
+
+logger = logging.getLogger(__name__)
 
 # Load env variables
 load_dotenv()
@@ -25,13 +44,13 @@ gemini_available = False
 
 if GEMINI_API_KEY and GEMINI_API_KEY != 'your-gemini-api-key-here':
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
+        genai.configure(api_key=GEMINI_API_KEY, transport='rest')
         gemini_available = True
-        print("✅ Global AI Evaluator: Gemini API configured successfully")
+        logger.info("[AI OK] Global AI Evaluator: Gemini API configured successfully (REST)")
     except Exception as e:
-        print(f"⚠️ Global AI Evaluator: Failed to configure Gemini API: {str(e)}")
+        logger.error("[AI WARN] Global AI Evaluator: Failed to configure Gemini API: %s", e)
 else:
-    print("⚠️ Global AI Evaluator: GEMINI_API_KEY not configured or placeholder used. Running with mock fallbacks.")
+    logger.warning("[AI WARN] Global AI Evaluator: GEMINI_API_KEY not configured or placeholder used. Running with smart fallbacks.")
 
 
 def evaluate_7cs(text: str, module_type: str, context_metrics: dict) -> dict:
@@ -51,12 +70,6 @@ def evaluate_7cs(text: str, module_type: str, context_metrics: dict) -> dict:
         text = "No content provided."
 
     # ===== STEP 0: GRAMMAR PRE-PASS (LanguageTool Cloud API) =====
-    # Run only for document and speech modules (not live — transcript is too fragmented)
-    grammar_issues = []
-    grammar_summary_text = ""
-    computed_grammar_score = 100
-
-    # ===== STEP 0: GRAMMAR PRE-PASS (LanguageTool Cloud API) =====
     # Runs for ALL module types: document, speech, and live transcript.
     grammar_issues = []
     grammar_summary_text = ""
@@ -68,14 +81,31 @@ def evaluate_7cs(text: str, module_type: str, context_metrics: dict) -> dict:
         computed_grammar_score = lt_grammar_score(grammar_issues, word_count_for_grammar)
         grammar_summary_text = summarise_grammar_issues(grammar_issues)
         if grammar_issues:
-            print(f"[GRAMMAR] LanguageTool detected {len(grammar_issues)} issues (module={module_type}). Grammar score: {computed_grammar_score}/100")
+            logger.info("[GRAMMAR] LanguageTool detected %d issues (module=%s). Grammar score: %d/100", len(grammar_issues), module_type, computed_grammar_score)
         else:
-            print(f"[GRAMMAR] LanguageTool: No grammar issues detected (module={module_type}).")
+            logger.info("[GRAMMAR] LanguageTool: No grammar issues detected (module=%s).", module_type)
     except Exception as _ge:
-        print(f"[GRAMMAR WARN] Grammar pre-pass failed: {_ge}. Continuing without grammar data.")
+        logger.warning("[GRAMMAR WARN] Grammar pre-pass failed: %s. Continuing without grammar data.", _ge)
         grammar_issues = []
         grammar_summary_text = ""
         computed_grammar_score = 100
+
+    # ===== HELPER: Grammar grade badge =====
+    def _grammar_grade(score: int) -> str:
+        if score >= 90: return 'A'
+        if score >= 80: return 'B'
+        if score >= 70: return 'C'
+        if score >= 60: return 'D'
+        return 'F'
+
+    def _grammar_summary_short(score: int, issues: list) -> str:
+        if score >= 90:
+            return f"Excellent grammar ({score}/100). No significant issues detected."
+        if score >= 80:
+            return f"Good grammar ({score}/100). {len(issues)} minor issue(s) found."
+        if score >= 70:
+            return f"Acceptable grammar ({score}/100). {len(issues)} issue(s) should be corrected."
+        return f"Grammar needs improvement ({score}/100). {len(issues)} issue(s) detected — review carefully."
 
     # ===== BUILD DYNAMIC FALLBACK RESPONSE =====
     fallback_json = {}
@@ -86,9 +116,19 @@ def evaluate_7cs(text: str, module_type: str, context_metrics: dict) -> dict:
         
         # Local Heuristic Analysis (when Gemini is unavailable)
         word_count = len(text.split())
+        sentences = [s.strip() for s in re.split(r'[.!?]+', text) if len(s.strip()) > 5]
+        sentence_count = len(sentences)
         text_lower = text.lower()
         filename_lower = filename.lower()
         
+        # Compute sentence length variety (higher = more varied = better)
+        if sentences:
+            avg_len = sum(len(s.split()) for s in sentences) / len(sentences)
+            variance = sum(abs(len(s.split()) - avg_len) for s in sentences) / len(sentences)
+            sentence_variety_score = min(100, int(variance * 10))
+        else:
+            avg_len, variance, sentence_variety_score = 10, 0, 50
+
         # Start with a base score, then deduct/add based on heuristics
         score_base = 78
         reasons_for_low_score = []
@@ -119,137 +159,153 @@ def evaluate_7cs(text: str, module_type: str, context_metrics: dict) -> dict:
             score_base -= 10
             reasons_for_low_score.append("High density of verbal fillers or conversational language in written notes")
 
+        # Heuristic 5: Factor in computed grammar score
+        if computed_grammar_score < 70:
+            score_base -= 8
+            reasons_for_low_score.append(f"Grammar issues detected ({computed_grammar_score}/100 grammar score)")
+
         # Clamp score between 25 and 95
         overall_score = max(25, min(95, score_base))
         
+        # ===== DYNAMIC CONTENT-AWARE STRENGTHS & RECOMMENDATIONS =====
+        depth_adj = 'strong' if word_count > 400 else ('adequate' if word_count > 150 else 'limited')
+        grammar_adj = 'excellent' if computed_grammar_score >= 85 else ('good' if computed_grammar_score >= 70 else 'below average')
+        structure_adj = 'well-structured' if has_structure else 'loosely structured'
+        variety_adj = 'varied and engaging' if sentence_variety_score >= 40 else 'somewhat monotonous'
+
         if overall_score < 60:
-            fallback_json = {
-                "overall_score": overall_score,
-                "document_name": filename,
-                "category_scores": {
-                    "Structure": max(20, overall_score - 5),
-                    "Clarity": max(20, overall_score - 10),
-                    "Persuasion": max(20, overall_score - 8),
-                    "Content_Quality": max(20, overall_score - 12),
-                    "Call_to_Action": max(20, overall_score - 15),
-                    "Grammar_and_Syntax": max(20, overall_score - 7),
-                    "Accuracy": max(20, overall_score - 6),
-                    "Tone_Appropriateness": max(30, overall_score + 4),
-                    "Audience_Alignment": max(20, overall_score - 9),
-                    "Purpose_Fulfillment": max(20, overall_score - 5)
-                },
-                "context_analysis": {
-                    "context_accuracy_score": max(30, overall_score - 5),
-                    "is_context_accurate": False,
-                    "factual_correctness_summary": "The document shows contextual gaps and informal phrasing. Information lacks rigorous evidence and clear domain alignment.",
-                    "inaccuracies_detected": [
-                        "Vague or unsupported claims in text body.",
-                        "Lacks verifiable data points or specific domain context."
-                    ],
-                    "context_based_changes": [
-                        "Verify and replace informal statements with precise domain terminology.",
-                        "Add factual evidence, citations, or quantitative metrics to support claims.",
-                        "Ensure logical continuity between introduction and conclusion slides."
-                    ]
-                },
-                "seven_cs_evaluation": {
-                    "Clear": "The core message is obscured by poor phrasing and disorganized flow.",
-                    "Concise": "The document is either too brief to convey meaning, or cluttered with redundant thoughts.",
-                    "Correct": "There are noticeable grammar mistakes, typos, or informal expressions.",
-                    "Complete": "Critical slides (such as a call-to-action or conclusion) are missing.",
-                    "Courteous": "The tone is overly casual or lacks a professional standard.",
-                    "Concrete": "The presentation is abstract and lacks concrete facts, data, or citations.",
-                    "Consistent": "Formatting, bullet usage, or tone is inconsistent throughout."
-                },
-                "seven_cs_scores": {
-                    "Clear": max(20, overall_score - 5),
-                    "Concise": max(20, overall_score - 12),
-                    "Correct": max(20, overall_score - 10),
-                    "Complete": max(20, overall_score - 15),
-                    "Courteous": max(30, overall_score + 5),
-                    "Concrete": max(20, overall_score - 8),
-                    "Consistent": max(20, overall_score - 14)
-                },
-                "strengths": [
-                    "The topic choice is relevant.",
-                    "Basic intent is visible.",
-                    "File uploaded successfully."
-                ],
-                "recommendations": [
-                    "Structure your presentation with clear slides (Slide 1: Intro, Slide 2: Body, Slide 3: Conclusion).",
-                    "Remove conversational filler words and use formal, active verbs.",
-                    "Add a strong Call-to-Action slide at the end to guide the audience."
-                ],
-                "detailed_feedback": f"This presentation needs significant revision. It scored {overall_score}/100 due to several issues: {', '.join(reasons_for_low_score)}. To improve, you should organize your points chronologically and use formal professional vocabulary.",
-                "improved_text": (
-                    f"# {os.path.splitext(filename)[0].upper()} (PROFESSIONAL REWRITE)\n\n"
-                    "Slide 1: Executive Summary\n"
-                    "We present a structured analysis of our proposed clinical framework, focusing on efficiency, diagnostics, and patient safety.\n\n"
-                    "Slide 2: Core Methodology\n"
-                    "Our approach leverages advanced deep learning models to screen medical images, reducing analysis latency by 40%.\n\n"
-                    "Slide 3: Key Benefits & Action Plan\n"
-                    "Implementing this system reduces physician administrative load, allowing for enhanced patient interaction and improved care quality."
-                )
+            dynamic_strengths = [
+                f"Document contains {word_count} words — content exists and can be refined.",
+                f"Grammar score: {computed_grammar_score}/100 ({grammar_adj}) — " + ("some positive aspects" if computed_grammar_score >= 60 else "significant room for improvement."),
+                "Core topic intent is identifiable even in current state."
+            ]
+            dynamic_recs = [
+                f"Restructure content with clear slide boundaries: Intro, {sentence_count // 3 or 1} body slides, and a Conclusion.",
+                f"Remove the {filler_count} detected filler expressions; replace with precise professional vocabulary.",
+                "Add at least 2-3 quantitative data points (percentages, timelines, KPIs) to support your main argument.",
+                "Ensure each slide has a single clear topic sentence before elaborating."
+            ]
+            seven_cs_eval = {
+                "Clear": f"The core message is {'' if has_structure else 'not '}clearly organized. {'' if has_structure else 'Add slide headers and agenda.'}",
+                "Concise": f"At {word_count} words, the document is {'concise' if word_count < 300 else 'lengthy'} but {'lacks depth' if word_count < 100 else 'risks verbosity'}.",
+                "Correct": f"Grammar score of {computed_grammar_score}/100 indicates {'noticeable errors requiring attention' if computed_grammar_score < 70 else 'minor correction opportunities'}.",
+                "Complete": f"{'Critical sections like conclusion or call-to-action appear missing.' if not has_structure else 'Basic structure is present but could be expanded.'}",
+                "Courteous": "The tone needs refinement to meet professional presentation standards.",
+                "Concrete": f"Sentence length variety ({sentence_variety_score}/100) suggests {'abstract, generic content' if sentence_variety_score < 30 else 'some concrete examples'}. Add specific metrics.",
+                "Consistent": "Formatting, terminology, and bullet usage need standardization across all slides."
             }
+            seven_cs_scores = {
+                "Clear": max(20, overall_score - 5),
+                "Concise": max(20, overall_score - 12),
+                "Correct": max(20, min(100, computed_grammar_score - 10)),
+                "Complete": max(20, overall_score - 15),
+                "Courteous": max(30, overall_score + 5),
+                "Concrete": max(20, overall_score - 8),
+                "Consistent": max(20, overall_score - 14)
+            }
+            detailed_feedback = (
+                f"STRUCTURE ASSESSMENT: This presentation scored {overall_score}/100. "
+                f"It contains {word_count} words across an estimated {max(1, sentence_count // 5)} slides, "
+                f"which is {'below the recommended 200+ words for a complete deck' if word_count < 200 else 'within acceptable range'}. "
+                f"The content appears {structure_adj} with {'clear sectioning evident' if has_structure else 'no clear slide or section markers detected'}.\n\n"
+                f"LANGUAGE QUALITY: Grammar score is {computed_grammar_score}/100 (Grade {_grammar_grade(computed_grammar_score)}). "
+                f"{'No significant grammar issues detected.' if not grammar_issues else f'{len(grammar_issues)} grammar issue(s) were flagged. Key areas: {grammar_summary_text[:200] if grammar_summary_text else "See detailed grammar report."}'}. "
+                f"Sentence length variety is rated {sentence_variety_score}/100 — aim for a mix of short (under 10 words) and developed (15–25 words) sentences.\n\n"
+                f"TOP 3 PRIORITY ACTIONS: (1) {'Add clear slide-by-slide structure with titled sections.' if not has_structure else 'Deepen the content with domain-specific evidence and data.'}  "
+                f"(2) {'Reduce the {filler_count} detected informal expressions to maintain professional register.' if filler_count > 0 else 'Maintain the professional register throughout all slides.'}  "
+                f"(3) {'Improve grammar quality — address the flagged issues before presenting.' if computed_grammar_score < 70 else 'Strengthen your call-to-action slide with a concrete next step or decision request.'}"
+            )
         else:
-            fallback_json = {
-                "overall_score": overall_score,
-                "document_name": filename,
-                "category_scores": {
-                    "Structure": min(100, overall_score + 5),
-                    "Clarity": min(100, overall_score + 2),
-                    "Persuasion": min(100, overall_score - 3),
-                    "Content_Quality": min(100, overall_score + 4),
-                    "Call_to_Action": min(100, overall_score - 5),
-                    "Grammar_and_Syntax": min(100, overall_score + 3),
-                    "Accuracy": min(100, overall_score + 5),
-                    "Tone_Appropriateness": min(100, overall_score + 6),
-                    "Audience_Alignment": min(100, overall_score + 1),
-                    "Purpose_Fulfillment": min(100, overall_score + 2)
-                },
-                "context_analysis": {
-                    "context_accuracy_score": min(100, overall_score + 3),
-                    "is_context_accurate": True,
-                    "factual_correctness_summary": "The presentation content aligns logically with the topic domain. Statements and concepts are contextualized accurately with clear presentation flow.",
-                    "inaccuracies_detected": [
-                        "No major factual inaccuracies or context contradictions detected."
-                    ],
-                    "context_based_changes": [
-                        "Consider backing up key statements with concrete citations or numerical metrics.",
-                        "Sharpen technical terminology in body slides to ensure full domain precision."
-                    ]
-                },
-                "seven_cs_evaluation": {
-                    "Clear": "The main points are clearly laid out and easy to follow.",
-                    "Concise": "The document expresses ideas efficiently with minimal fluff.",
-                    "Correct": "Grammar and punctuation are correct throughout.",
-                    "Complete": "The presentation is complete, addressing all primary requirements.",
-                    "Courteous": "The tone is professional and respectful.",
-                    "Concrete": "The presentation details specific methods and outcomes.",
-                    "Consistent": "The document maintains a consistent layout and vocabulary."
-                },
-                "seven_cs_scores": {
-                    "Clear": min(100, overall_score + 4),
-                    "Concise": min(100, overall_score + 2),
-                    "Correct": min(100, overall_score + 5),
-                    "Complete": min(100, overall_score + 3),
-                    "Courteous": min(100, overall_score + 6),
-                    "Concrete": min(100, overall_score + 1),
-                    "Consistent": min(100, overall_score + 2)
-                },
-                "strengths": [
-                    "Clear slide-by-slide structure.",
-                    "Professional and engaging tone.",
-                    "Logical progression of ideas."
-                ],
-                "recommendations": [
-                    "Optimize spacing on slides to prevent text crowding.",
-                    "Add empirical metrics to support your key arguments.",
-                    "Inject a more memorable closing statement in your conclusion."
-                ],
-                "detailed_feedback": "This document represents a high-quality presentation. The logic flows well and the style is appropriate. Implementing the suggested minor fixes will elevate this from a good presentation to an outstanding one.",
-                "improved_text": f"# {os.path.splitext(filename)[0].upper()} (IMPROVED VERSION)\n\n{text}\n\n---\n*Note: Polished for conciseness and style by the AI assistant.*"
+            dynamic_strengths = [
+                f"Content depth is {depth_adj}: {word_count} words provide {'comprehensive' if word_count > 300 else 'adequate'} coverage.",
+                f"Grammar quality is {grammar_adj} at {computed_grammar_score}/100 (Grade {_grammar_grade(computed_grammar_score)}).",
+                f"Sentence structure is {variety_adj} (variety score: {sentence_variety_score}/100)."
+            ]
+            dynamic_recs = [
+                "Reinforce your strongest argument with an empirical data point, statistic, or case study.",
+                f"{'Correct the ' + str(len(grammar_issues)) + ' grammar issue(s) for a polished final version.' if grammar_issues else 'Maintain grammar quality in any future edits.'}",
+                "Add a memorable closing statement or call-to-action in your conclusion slide.",
+                f"Ensure visual consistency: use {'the same' if has_structure else 'a unified'} font size, bullet style, and heading format on every slide."
+            ]
+            seven_cs_eval = {
+                "Clear": f"Main points are {'' if has_structure else 'reasonably '}clear and follow a logical progression across {sentence_count} sentences.",
+                "Concise": f"At {word_count} words, the document is {'appropriately concise' if word_count < 500 else 'somewhat lengthy — consider trimming verbose sections'}.",
+                "Correct": f"Grammar score of {computed_grammar_score}/100 indicates {grammar_adj} language quality.",
+                "Complete": f"The presentation {'covers all primary' if has_structure else 'covers most'} required sections. {'A conclusion or CTA slide would complete the deck.' if not has_structure else ''}",
+                "Courteous": "The tone is professional and respectful of the target audience.",
+                "Concrete": f"Sentence variety ({sentence_variety_score}/100) indicates {variety_adj} content. {'Consider adding more specific examples or data.' if sentence_variety_score < 50 else ''}",
+                "Consistent": "The document maintains reasonably consistent structure and vocabulary throughout."
             }
+            seven_cs_scores = {
+                "Clear": min(100, overall_score + 4),
+                "Concise": min(100, overall_score + 2),
+                "Correct": min(100, computed_grammar_score),
+                "Complete": min(100, overall_score + 3),
+                "Courteous": min(100, overall_score + 6),
+                "Concrete": min(100, overall_score + 1),
+                "Consistent": min(100, overall_score + 2)
+            }
+            detailed_feedback = (
+                f"STRUCTURE ASSESSMENT: This presentation scored {overall_score}/100 overall. "
+                f"It contains {word_count} words across an estimated {max(1, sentence_count // 5)} slides — "
+                f"{'a thorough and comprehensive deck' if word_count > 400 else 'a solid foundation'}. "
+                f"The content is {structure_adj}, {'with recognizable section markers and clear slide flow' if has_structure else 'with room to strengthen the slide-by-slide organization'}.\n\n"
+                f"LANGUAGE QUALITY: Grammar score is {computed_grammar_score}/100 (Grade {_grammar_grade(computed_grammar_score)}). "
+                f"{'No grammar issues detected — excellent writing quality.' if not grammar_issues else f'{len(grammar_issues)} minor grammar issue(s) were flagged: {grammar_summary_text[:150] if grammar_summary_text else "Review the grammar report."}'}. "
+                f"Sentence variety is {variety_adj} ({sentence_variety_score}/100), which {'helps' if sentence_variety_score >= 40 else 'could be improved to better'} maintain audience engagement.\n\n"
+                f"TOP 3 PRIORITY ACTIONS: "
+                f"(1) {'Fix the ' + str(len(grammar_issues)) + ' flagged grammar issue(s) before your final presentation.' if grammar_issues else 'Run a final proofreading pass to catch any late-stage edits.'}  "
+                f"(2) {'Optimize spacing and visual balance across slides to prevent text crowding.' if word_count > 400 else 'Add 1-2 more data-rich slides to deepen your argument.'}  "
+                f"(3) Inject a more memorable closing statement in your conclusion slide to leave a lasting impression."
+            )
+
+        fallback_json = {
+            "overall_score": overall_score,
+            "document_name": filename,
+            "category_scores": {
+                "Structure": min(100, max(20, overall_score + (5 if has_structure else -10))),
+                "Clarity": min(100, max(20, overall_score + 2)),
+                "Persuasion": min(100, max(20, overall_score - 3)),
+                "Content_Quality": min(100, max(20, overall_score + (4 if word_count > 200 else -8))),
+                "Call_to_Action": min(100, max(20, overall_score - 5)),
+                "Grammar_and_Syntax": min(100, max(20, computed_grammar_score)),
+                "Accuracy": min(100, max(20, overall_score + 5)),
+                "Tone_Appropriateness": min(100, max(30, overall_score + 6)),
+                "Audience_Alignment": min(100, max(20, overall_score + 1)),
+                "Purpose_Fulfillment": min(100, max(20, overall_score + 2))
+            },
+            "context_analysis": {
+                "context_accuracy_score": min(100, max(30, overall_score + 3)),
+                "is_context_accurate": overall_score >= 60,
+                "factual_correctness_summary": (
+                    "The presentation content aligns logically with the topic domain."
+                    if overall_score >= 60
+                    else "The document shows contextual gaps and informal phrasing. Information lacks rigorous evidence."
+                ),
+                "inaccuracies_detected": [
+                    "No major factual inaccuracies detected."
+                ] if overall_score >= 60 else [
+                    "Vague or unsupported claims in text body.",
+                    "Lacks verifiable data points or specific domain context."
+                ],
+                "context_based_changes": [
+                    "Consider backing up key statements with concrete citations or numerical metrics.",
+                    "Sharpen technical terminology in body slides to ensure full domain precision."
+                ]
+            },
+            "seven_cs_evaluation": seven_cs_eval,
+            "seven_cs_scores": seven_cs_scores,
+            "strengths": dynamic_strengths,
+            "recommendations": dynamic_recs,
+            "detailed_feedback": detailed_feedback,
+            "improved_text": f"# {os.path.splitext(filename)[0].upper()} (IMPROVED VERSION)\n\n{text}\n\n---\n*Note: Polished for conciseness and style by the AI assistant.*",
+            # Grammar enrichment
+            "grammar_score": computed_grammar_score,
+            "grammar_grade": _grammar_grade(computed_grammar_score),
+            "grammar_summary_short": _grammar_summary_short(computed_grammar_score, grammar_issues),
+            "grammar_issues": grammar_issues,
+            "grammar_issues_count": len(grammar_issues),
+        }
         
     elif module_type == 'speech':
         speech_speed_wpm = context_metrics.get("speech_speed_wpm", 130)
@@ -382,12 +438,15 @@ def evaluate_7cs(text: str, module_type: str, context_metrics: dict) -> dict:
             "Consistent": f"Visual focus and body posture remained consistent (posture: {avg_posture}%) during delivery." if has_visual_metrics else "Consistency could not be scored from visual metrics because no valid video samples were captured."
         }
         
-    if insufficient_live_data:
+        if insufficient_live_data:
             fallback_json = {
                 "overall_score": 0,
                 "category_scores": {
                     "Structure": 0, "Clarity": 0, "Persuasion": 0,
-                    "Content_Quality": 0, "Call_to_Action": 0
+                    "Content_Quality": 0, "Call_to_Action": 0,
+                    "Grammar_and_Syntax": 0, "Accuracy": 0,
+                    "Tone_Appropriateness": 0, "Audience_Alignment": 0,
+                    "Purpose_Fulfillment": 0
                 },
                 "seven_cs_evaluation": {
                     c: "Not scored — no camera or microphone data was captured for this session."
@@ -404,6 +463,53 @@ def evaluate_7cs(text: str, module_type: str, context_metrics: dict) -> dict:
                 "qna_analysis": "No panelist interruptions occurred during this session.",
                 "detailed_feedback": "No usable video or audio data was captured during this session, so no delivery score could be generated. Check your camera and microphone permissions and try again.",
                 "improved_text": "No speech was captured during this session."
+            }
+        else:
+            # Full structured fallback with verified ratings from captured telemetry
+            clear_score = max(30, min(95, int((avg_eye * 0.6) + (85 if 120 <= avg_wpm <= 160 else 65) * 0.4))) if (has_visual_metrics or has_voice_metrics) else 70
+            concise_score = max(25, min(95, 100 - (fillers * 6) - (abs(avg_wpm - 140) // 2 if has_voice_metrics else 10)))
+            correct_score = computed_grammar_score
+            complete_score = max(30, min(95, avg_qna if has_qna_scores else (82 if len(text.split()) > 15 else 65)))
+            courteous_score = max(30, min(95, avg_posture if has_visual_metrics else 80))
+            concrete_score = max(30, min(95, int((overall_score * 0.5) + (avg_qna * 0.5 if has_qna_scores else 40))))
+            consistent_score = max(30, min(95, int((avg_eye * 0.5 + avg_posture * 0.5) if has_visual_metrics else 75)))
+
+            fallback_json = {
+                "overall_score": overall_score,
+                "category_scores": {
+                    "Structure": max(25, min(95, int(overall_score * 0.95))),
+                    "Clarity": clear_score,
+                    "Persuasion": max(25, min(95, int(avg_eye * 0.5 + avg_posture * 0.5 if has_visual_metrics else overall_score))),
+                    "Content_Quality": max(25, min(95, avg_qna if has_qna_scores else int(overall_score * 0.9))),
+                    "Call_to_Action": max(25, min(95, int(overall_score * 0.85))),
+                    "Grammar_and_Syntax": computed_grammar_score,
+                    "Accuracy": max(25, min(95, avg_qna if has_qna_scores else 80)),
+                    "Tone_Appropriateness": courteous_score,
+                    "Audience_Alignment": max(25, min(95, int(overall_score * 0.92))),
+                    "Purpose_Fulfillment": overall_score
+                },
+                "seven_cs_evaluation": seven_cs_eval,
+                "seven_cs_scores": {
+                    "Clear": clear_score,
+                    "Concise": concise_score,
+                    "Correct": correct_score,
+                    "Complete": complete_score,
+                    "Courteous": courteous_score,
+                    "Concrete": concrete_score,
+                    "Consistent": consistent_score
+                },
+                "strengths": strengths_list,
+                "recommendations": recs_list,
+                "qna_analysis": qna_feedback,
+                "detailed_feedback": (
+                    f"Live presentation analysis for topic '{context_metrics.get('topic', 'Live Practice')}': "
+                    f"Overall score achieved is {overall_score}/100. "
+                    f"{'Average eye contact was ' + str(avg_eye) + '% and posture was ' + str(avg_posture) + '%. ' if has_visual_metrics else 'Visual metrics were not detected. '}"
+                    f"{'Speaking rate averaged ' + str(avg_wpm) + ' WPM with ' + str(fillers) + ' filler words detected. ' if has_voice_metrics else ''}"
+                    f"{'Academic panelist Q&A score was ' + str(avg_qna) + '%. ' if has_qna_scores else ''}"
+                    f"Continue practicing to maintain high engagement and posture throughout your presentation."
+                ),
+                "improved_text": text if text and text != "No content provided." else f"Presentation rehearsal on topic: {context_metrics.get('topic', 'General')}"
             }
 
     # ===== BUILD DYNAMIC PROMPT FOR GEMINI =====
@@ -648,7 +754,7 @@ JSON Schema:
     # ===== RUN GEMINI INVOCATION =====
     if gemini_available and analysis_prompt:
         try:
-            model = genai.GenerativeModel(os.getenv('GEMINI_MODEL', 'gemini-3.6-flash'))
+            model = genai.GenerativeModel(os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'))
             response = model.generate_content(
                 analysis_prompt,
                 generation_config={
@@ -677,7 +783,7 @@ JSON Schema:
 
             return analysis_json
         except Exception as e:
-            print(f"⚠️ Global AI Evaluator: Gemini call failed ({str(e)}). Falling back to smart heuristics.")
+            logger.warning("Global AI Evaluator: Gemini call failed (%s). Falling back to smart heuristics.", e)
             # Attach grammar data to fallback — all module types
             fallback_json['grammar_score']  = computed_grammar_score
             fallback_json['grammar_issues'] = grammar_issues
@@ -764,7 +870,7 @@ Version 2 Text:
 
     if gemini_available:
         try:
-            model = genai.GenerativeModel(os.getenv('GEMINI_MODEL', 'gemini-3.6-flash'))
+            model = genai.GenerativeModel(os.getenv('GEMINI_MODEL', 'gemini-2.5-flash'))
             response = model.generate_content(
                 compare_prompt,
                 generation_config={
@@ -775,7 +881,7 @@ Version 2 Text:
             )
             return json.loads(response.text)
         except Exception as e:
-            print(f"⚠️ Global AI Evaluator: Comparison call failed ({str(e)}). Using heuristics.")
+            logger.warning("Global AI Evaluator: Comparison call failed (%s). Using heuristics.", e)
             return fallback_json
     else:
         return fallback_json

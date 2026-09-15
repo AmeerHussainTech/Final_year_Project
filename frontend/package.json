@@ -17,7 +17,7 @@
     "electron:build:linux": "npm run build && electron-builder --linux"
   },
   "dependencies": {
-    "firebase": "^12.18.0",
+    "firebase": "12.18.0",
     "jspdf": "^2.5.1",
     "react": "^18.2.0",
     "react-diff-viewer-continued": "^4.2.2",

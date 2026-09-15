@@ -10,25 +10,31 @@ import sys
 import os
 from typing import Dict, Any, Tuple
 
-# Ensure user site-packages directory is in sys.path
-site_packages = os.path.expanduser(r'~\AppData\Roaming\Python\Python314\site-packages')
-if os.path.exists(site_packages) and site_packages not in sys.path:
-    sys.path.insert(0, site_packages)
-
 logger = logging.getLogger(__name__)
 
-# Intent Training Dataset (~100 samples)
+# Intent Training Dataset (Expanded ~100 diverse samples across 6 intent classes)
 TRAINING_DATA = [
     # greeting
     ("hello dr vance", "greeting"),
     ("hi there", "greeting"),
     ("good morning", "greeting"),
+    ("good afternoon", "greeting"),
+    ("good evening", "greeting"),
     ("hey coach", "greeting"),
     ("ready to start practice", "greeting"),
     ("let's begin the rehearsal", "greeting"),
     ("start session", "greeting"),
     ("hello", "greeting"),
-    
+    ("hi coach", "greeting"),
+    ("hey dr vance let's practice", "greeting"),
+    ("starting my defense practice now", "greeting"),
+    ("can we start our rehearsal?", "greeting"),
+    ("greetings professor", "greeting"),
+    ("hi i am ready for evaluation", "greeting"),
+    ("welcome back", "greeting"),
+    ("let's do a run through", "greeting"),
+    ("ready when you are", "greeting"),
+
     # slide_feedback
     ("how do my slides look?", "slide_feedback"),
     ("is my text density too high?", "slide_feedback"),
@@ -38,6 +44,18 @@ TRAINING_DATA = [
     ("review my presentation design", "slide_feedback"),
     ("slide feedback please", "slide_feedback"),
     ("are my slides readable?", "slide_feedback"),
+    ("are there too many words on my slides?", "slide_feedback"),
+    ("is my font too small to read?", "slide_feedback"),
+    ("critique my color scheme", "slide_feedback"),
+    ("is my presentation visually balanced?", "slide_feedback"),
+    ("how many slides should I have?", "slide_feedback"),
+    ("can you analyze my slide visual hierarchy?", "slide_feedback"),
+    ("are these graphics distracting?", "slide_feedback"),
+    ("evaluate my presentation visuals", "slide_feedback"),
+    ("do I have too much content per slide?", "slide_feedback"),
+    ("is the typography legible?", "slide_feedback"),
+    ("slide aesthetics critique", "slide_feedback"),
+    ("check document structure and slide clarity", "slide_feedback"),
 
     # pacing_question
     ("am I speaking too fast?", "pacing_question"),
@@ -47,6 +65,16 @@ TRAINING_DATA = [
     ("wpm feedback", "pacing_question"),
     ("am I rushing through slides?", "pacing_question"),
     ("speech tempo check", "pacing_question"),
+    ("am I talking too slowly?", "pacing_question"),
+    ("how was my rhythm and cadence?", "pacing_question"),
+    ("is my delivery too fast for the audience?", "pacing_question"),
+    ("check my speaking rate", "pacing_question"),
+    ("did I spend enough time on each slide?", "pacing_question"),
+    ("am I dragging or droning on?", "pacing_question"),
+    ("how is my speech cadence?", "pacing_question"),
+    ("evaluate my speech timing", "pacing_question"),
+    ("am I speaking at 130 to 150 words per minute?", "pacing_question"),
+    ("pacing critique please", "pacing_question"),
 
     # viva_prep
     ("ask me a thesis defense question", "viva_prep"),
@@ -55,6 +83,16 @@ TRAINING_DATA = [
     ("viva practice question", "viva_prep"),
     ("what will the panel ask me?", "viva_prep"),
     ("test my research defense", "viva_prep"),
+    ("cross examine my conclusions", "viva_prep"),
+    ("ask me a tough technical question", "viva_prep"),
+    ("simulate viva panel questions", "viva_prep"),
+    ("probe my system architecture", "viva_prep"),
+    ("give me a challenging counter-argument", "viva_prep"),
+    ("challenge my statistical results", "viva_prep"),
+    ("test my conceptual depth on this project", "viva_prep"),
+    ("what are the limitations of my study?", "viva_prep"),
+    ("how would I defend against edge case failures?", "viva_prep"),
+    ("pose an examiner question to me", "viva_prep"),
 
     # disfluency_query
     ("did I use too many filler words?", "disfluency_query"),
@@ -62,6 +100,14 @@ TRAINING_DATA = [
     ("check my verbal disfluencies", "disfluency_query"),
     ("am I using filler words?", "disfluency_query"),
     ("verbal fluency feedback", "disfluency_query"),
+    ("did I say like or you know too much?", "disfluency_query"),
+    ("how can I stop saying um?", "disfluency_query"),
+    ("count my speech fillers", "disfluency_query"),
+    ("am I repeating words frequently?", "disfluency_query"),
+    ("evaluate my vocal fillers and pauses", "disfluency_query"),
+    ("disfluency breakdown", "disfluency_query"),
+    ("how clean was my verbal articulation?", "disfluency_query"),
+    ("did I stammer or pause awkwardly?", "disfluency_query"),
 
     # general_help
     ("what should I work on next?", "general_help"),
@@ -69,6 +115,13 @@ TRAINING_DATA = [
     ("give me general coaching advice", "general_help"),
     ("summarize my strengths and weaknesses", "general_help"),
     ("what is my overall score?", "general_help"),
+    ("how do I score higher in 7Cs?", "general_help"),
+    ("what are my top 3 areas of improvement?", "general_help"),
+    ("give me an executive assessment of my presentation", "general_help"),
+    ("recommend next practice steps", "general_help"),
+    ("how ready am I for the final presentation?", "general_help"),
+    ("overview of my performance", "general_help"),
+    ("tips for confidence and stage presence", "general_help"),
 ]
 
 _CLASSIFIER_PIPELINE = None

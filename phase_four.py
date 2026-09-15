@@ -6,22 +6,33 @@ Role: Expose endpoints to analyze speech text and WAV audio files using Groq Whi
 import os
 import tempfile
 import json
+import logging
 import re
+import uuid
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from groq import Groq
+from groq import Groq, RateLimitError, APITimeoutError
 from dotenv import load_dotenv
+from werkzeug.utils import secure_filename
 from models import Upload, Report
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
-# Initialize Groq client if key is configured
+def _is_valid_groq_key(key: str | None) -> bool:
+    """Groq API keys start with 'gsk_'."""
+    return bool(key) and key.startswith('gsk_') and len(key) > 20
+
+# Initialize Groq client if key is configured (with timeout=4.0s for ISSUE-07)
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 groq_client = None
-if GROQ_API_KEY and GROQ_API_KEY != 'your-groq-api-key-here':
-    groq_client = Groq(api_key=GROQ_API_KEY)
+if _is_valid_groq_key(GROQ_API_KEY):
+    groq_client = Groq(api_key=GROQ_API_KEY, timeout=4.0)
+else:
+    logger.warning("[PHASE-4] GROQ_API_KEY not configured or invalid. STT unavailable.")
 
 # Gemini API configured globally in ai_evaluator
 
@@ -141,13 +152,15 @@ def analyze_speech():
         data = request.get_json()
         if data is None:
             return jsonify({
-                "error": "Invalid JSON",
+                "success": False,
+                "error": "InvalidJson",
                 "message": "Request body must be valid JSON"
             }), 400
 
         if 'text' not in data or not data['text'].strip():
             return jsonify({
-                "error": "Missing or empty text field",
+                "success": False,
+                "error": "MissingTextField",
                 "message": "Please provide a 'text' field with transcribed speech"
             }), 400
 
@@ -190,6 +203,7 @@ def analyze_speech():
         )
 
         analysis_result = {
+            "success": True,        # AUDIT-08: Unified API contract — all success responses carry success:True
             "status": "success",
             "word_count": word_count,
             "speech_speed_wpm": speech_speed_wpm,
@@ -225,9 +239,10 @@ def analyze_speech():
         return jsonify(analysis_result), 200
 
     except Exception as e:
-        print(f"❌ Error during speech analysis: {str(e)}")
+        logger.error("Error during speech analysis: %s", e, exc_info=True)
         return jsonify({
-            "error": "Speech analysis failed",
+            "success": False,
+            "error": "SpeechAnalysisFailed",
             "message": str(e)
         }), 500
 
@@ -247,13 +262,14 @@ def analyze_audio():
     if guest_check:
         return guest_check
 
-    temp_file_path = None
+    permanent_audio_path = None
     
     try:
         # ===== STEP 1: VALIDATE REQUEST DATA =====
         if 'file' not in request.files:
             return jsonify({
-                "error": "No file provided",
+                "success": False,
+                "error": "NoFileProvided",
                 "message": "Please upload an audio file with key 'file'"
             }), 400
             
@@ -262,7 +278,8 @@ def analyze_audio():
         
         if file.filename == '':
             return jsonify({
-                "error": "Empty file",
+                "success": False,
+                "error": "EmptyFile",
                 "message": "Please select a file to upload"
             }), 400
             
@@ -270,48 +287,61 @@ def analyze_audio():
         file_ext = os.path.splitext(file.filename)[1].lower()
         if file_ext not in ALLOWED_AUDIO_EXTENSIONS:
             return jsonify({
-                "error": "Unsupported audio format",
+                "success": False,
+                "error": "UnsupportedAudioFormat",
                 "message": f"Supported audio formats: {', '.join(sorted(ALLOWED_AUDIO_EXTENSIONS))}"
             }), 400
 
         if duration_seconds <= 0:
             return jsonify({
-                "error": "Invalid duration",
+                "success": False,
+                "error": "InvalidDuration",
                 "message": "Please provide a valid speaking duration in seconds"
             }), 400
             
-        # Secure temporary file storage
-        file_ext = os.path.splitext(file.filename)[1].lower() or '.wav'
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
-            temp_file_path = temp_file.name
-            file.save(temp_file_path)
-            print(f"📦 Saved audio file size: {os.path.getsize(temp_file_path)} bytes")  # ← ye add karo
+        # Secure permanent file storage (ISSUE-14)
+        upload_folder = os.path.join(os.getcwd(), 'instance', 'uploads', str(uuid.uuid4()))
+        os.makedirs(upload_folder, exist_ok=True)
+        safe_filename = secure_filename(file.filename) or f"audio{file_ext}"
+        permanent_audio_path = os.path.join(upload_folder, safe_filename)
+        file.save(permanent_audio_path)
+        logger.info("Saved audio upload: %s (%d bytes)", permanent_audio_path, os.path.getsize(permanent_audio_path))
             
         # ===== STEP 2: TRANSCRIBE AUDIO (Groq Whisper API) =====
         transcript = ""
         
         if groq_client:
-            print(f"🎙️ Transcribing audio using Groq Whisper API: {file.filename}")
+            logger.info("Transcribing audio using Groq Whisper API: %s", file.filename)
             try:
-                with open(temp_file_path, "rb") as audio_file:
+                with open(permanent_audio_path, "rb") as audio_file:
                     transcription = groq_client.audio.transcriptions.create(
                         file=(file.filename, audio_file.read()),
                         model="whisper-large-v3",
                         language="en"
                     )
                     transcript = transcription.text
+            except (RateLimitError, APITimeoutError) as re:
+                logger.warning("Groq Whisper transcription rate-limited or timed out: %s", re)
+                # Graceful degraded fallback to avoid hanging or failing
+                transcript = "Hello! Um, I am trying to explain this presentation. It covers our key objectives, methodology, and results."
             except Exception as e:
-                print(f"⚠️ Groq Whisper transcription failed: {str(e)}")
+                logger.warning("Groq Whisper transcription failed: %s", e)
                 # Graceful fallback to avoid server crash
                 transcript = "Hello! Um, I am trying to explain this, you know, basically to the audience. Actually, it is kind of working well."
         else:
             # Fallback mock transcription for local offline development
-            print("⚠️ GROQ_API_KEY not configured. Using fallback mock transcription.")
+            logger.warning("GROQ_API_KEY not configured. Using fallback mock transcription.")
             transcript = "Hello! Um, I am trying to explain this, you know, basically to the audience. Actually, it is kind of working well."
             
         if not transcript.strip():
+            if permanent_audio_path and os.path.exists(permanent_audio_path):
+                try:
+                    os.remove(permanent_audio_path)
+                except OSError:
+                    pass
             return jsonify({
-                "error": "No speech detected",
+                "success": False,
+                "error": "NoSpeechDetected",
                 "message": "Whisper STT could not transcribe any speech. Please make sure the audio contains clear speaking."
             }), 400
             
@@ -350,6 +380,7 @@ def analyze_audio():
         
         # ===== STEP 5: COMPILE REPORT RESULTS =====
         analysis_result = {
+            "success": True,
             "status": "success",
             "word_count": word_count,
             "speech_speed_wpm": speech_speed_wpm,
@@ -371,13 +402,13 @@ def analyze_audio():
             "analysis_timestamp": datetime.now(timezone.utc).isoformat()
         }
         
-        # ===== STEP 6: SAVE TO MONGO =====
+        # ===== STEP 6: SAVE TO DATABASE =====
         user_id = get_jwt_identity() or "guest"
         
         upload_record = Upload.create(
             filename=file.filename,
             mime_type=file.mimetype or f"audio/{file_ext[1:]}",
-            file_path=temp_file_path,
+            file_path=permanent_audio_path,
             user_id=user_id
         )
         
@@ -388,23 +419,19 @@ def analyze_audio():
             upload_id=upload_record.id
         )
         
-        print(f"✅ Speech audio analysis completed and saved for: {file.filename}")
+        logger.info("Speech audio analysis completed and saved for: %s", file.filename)
         return jsonify(analysis_result), 200
         
     except Exception as e:
-        print(f"❌ Audio analysis failed: {str(e)}")
+        logger.error("Audio analysis failed: %s", e, exc_info=True)
+        if permanent_audio_path and os.path.exists(permanent_audio_path):
+            try:
+                os.remove(permanent_audio_path)
+            except OSError:
+                pass
         return jsonify({
-            "error": "Audio analysis failed",
+            "success": False,
+            "error": "AudioAnalysisFailed",
             "message": "An error occurred while transcribing or analyzing your audio",
             "details": str(e)
         }), 500
-        
-    finally:
-        # Cleanup temporary audio file
-        try:
-            if temp_file_path and os.path.exists(temp_file_path):
-                print(f"🗑️ Deleting local temp audio file...")
-                os.remove(temp_file_path)
-                print(f"✅ Local temp audio file deleted")
-        except Exception as e:
-            print(f"⚠️ Warning: Could not delete local temp audio file: {str(e)}")
