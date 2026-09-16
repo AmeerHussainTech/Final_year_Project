@@ -148,8 +148,13 @@ def create_app():
     # ===== CREATE FLASK APP =====
     app = Flask(__name__)
 
-    # Pre-warm ML models in background thread so server starts instantly
-    threading.Thread(target=prewarm_ml_models, daemon=True).start()
+    # On memory-constrained cloud hosts (e.g. Render Free Tier 512MB RAM),
+    # skip heavy background pre-warming to avoid Linux OOM kill.
+    # Models will lazy-load on their respective endpoint requests.
+    if os.getenv('RENDER') or os.getenv('LOW_MEMORY_MODE', '0') == '1':
+        logger.info("[PERF] Render cloud environment detected: lazy model loading active to fit within 512MB memory.")
+    else:
+        threading.Thread(target=prewarm_ml_models, daemon=True).start()
 
     # Start TTL purge worker for generated files and uploads
     _start_pptx_purge_worker()
