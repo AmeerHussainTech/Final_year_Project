@@ -31,8 +31,15 @@ _MEMORY_STORE = {
 _use_firestore = True
 
 # ── Firebase Admin SDK setup ─────────────────────────────────────────────────
-import firebase_admin
-from firebase_admin import credentials, firestore as fs
+FIREBASE_IMPORT_ERROR = None
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore as fs
+except Exception as _import_err:
+    firebase_admin = None
+    credentials = None
+    fs = None
+    FIREBASE_IMPORT_ERROR = str(_import_err)
 
 _firebase_app = None
 db = None
@@ -50,6 +57,11 @@ def _is_firestore_enabled():
 
 def _init_firebase():
     global _firebase_app, db
+    if FIREBASE_IMPORT_ERROR:
+        print(f"[DB WARN] Firebase libraries unavailable ({FIREBASE_IMPORT_ERROR}). Using local in-memory database.")
+        _disable_firestore()
+        return
+
     if _firebase_app is not None:
         return
 
