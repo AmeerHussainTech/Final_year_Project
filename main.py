@@ -181,13 +181,10 @@ def create_app():
     else:
         parsed_origins = list(DEFAULT_ALLOWED_ORIGINS)
 
-    # AUDIT-09: Allow dynamic Vercel preview deployments either when not in production
-    # OR when ALLOW_VERCEL_PREVIEWS=true is explicitly set (useful for Render+Vercel stacks).
-    flask_env = os.getenv('FLASK_ENV', 'development').lower()
-    allow_vercel_previews = os.getenv('ALLOW_VERCEL_PREVIEWS', 'false').lower() in ('1', 'true', 'yes', 'on')
-    if flask_env != 'production' or allow_vercel_previews:
-        import re
-        parsed_origins.append(re.compile(r"^https://.*\.vercel\.app$"))
+    # AUDIT-09: Allow dynamic Vercel and Render deployments
+    import re
+    parsed_origins.append(re.compile(r"^https://.*\.vercel\.app$"))
+    parsed_origins.append(re.compile(r"^https://.*\.onrender\.com$"))
 
     CORS(
         app,
@@ -195,8 +192,31 @@ def create_app():
             "origins": parsed_origins,
             "allow_headers": ["Content-Type", "Authorization"],
             "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            "supports_credentials": True,
         }},
     )
+
+    @app.before_request
+    def handle_preflight():
+        if request.method == "OPTIONS":
+            response = app.make_default_options_response()
+            origin = request.headers.get('Origin')
+            if origin:
+                response.headers['Access-Control-Allow-Origin'] = origin
+                response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
+                response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+                response.headers['Access-Control-Allow-Credentials'] = 'true'
+            return response
+
+    @app.after_request
+    def apply_cors_headers(response):
+        origin = request.headers.get('Origin')
+        if origin:
+            response.headers['Access-Control-Allow-Origin'] = origin
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
+            response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
+        return response
 
     # Flask enforces this before request handlers read multipart bodies. This
     # prevents oversized uploads from being copied to disk first.
