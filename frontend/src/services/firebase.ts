@@ -5,12 +5,12 @@ import {
 } from 'firebase/auth';
 
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyDemoKeyPlaceholder",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "fyp-integration-c620f.firebaseapp.com",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "fyp-integration-c620f",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "fyp-integration-c620f.appspot.com",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "1234567890",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:1234567890:web:abcdef"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyCyjQw9-oy4gulqi_2tYRllLLIqVXcedHU",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "fyp-firebase-df1f6.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "fyp-firebase-df1f6",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "fyp-firebase-df1f6.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "226547798919",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:226547798919:web:9fb5d255cfd7d099057922"
 };
 
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApps()[0];
@@ -25,7 +25,7 @@ export const isElectron = (): boolean => {
 };
 
 export const isFirebaseConfigured = (): boolean => {
-  const key = import.meta.env.VITE_FIREBASE_API_KEY;
+  const key = import.meta.env.VITE_FIREBASE_API_KEY || firebaseConfig.apiKey;
   return Boolean(key && key !== "AIzaSyDemoKeyPlaceholder" && !key.includes("Placeholder"));
 };
 
@@ -35,6 +35,8 @@ export const isFirebaseConfigured = (): boolean => {
 export const getFirebaseErrorMessage = (error: any): string => {
   const code = error?.code || '';
   switch (code) {
+    case 'auth/unauthorized-domain':
+      return 'This deployment domain is not authorized in Firebase Console. Go to Firebase Console > Authentication > Settings > Authorized Domains and add your Vercel / Render domain URL.';
     case 'auth/invalid-email':
       return 'Please enter a valid email address.';
     case 'auth/user-disabled':
@@ -50,13 +52,15 @@ export const getFirebaseErrorMessage = (error: any): string => {
       return 'Password should be at least 6 characters long.';
     case 'auth/popup-closed-by-user':
       return 'Sign-in popup was closed before completing authentication.';
+    case 'auth/cancelled-popup-request':
+      return 'Previous sign-in request was cancelled. Please try again.';
     case 'auth/popup-blocked':
       return 'Sign-in popup was blocked by browser. Please allow popups for this site.';
     case 'auth/network-request-failed':
       return 'Network connection error. Please check your connection and try again.';
     case 'auth/configuration-not-found':
     case 'auth/operation-not-allowed':
-      return 'Firebase Authentication is not enabled in Firebase Console. Go to Firebase Console > Authentication > Sign-in method and enable Email/Password (or use Sign Up tab).';
+      return 'Firebase Authentication is not enabled in Firebase Console. Go to Firebase Console > Authentication > Sign-in method and enable Google and Email/Password.';
     default:
       return error?.message || 'Authentication failed. Please try again.';
   }
