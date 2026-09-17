@@ -24,6 +24,7 @@ import Login from './pages/Login';
 import PresentationRewriter from './pages/PresentationRewriter';
 import PresentationGenerator from './pages/PresentationGenerator';
 import Download from './pages/Download';
+import LandingPage from './pages/LandingPage';
 import './App.css';
 
 const App: React.FC = () => {
@@ -33,8 +34,12 @@ const App: React.FC = () => {
         <Router>
           <Routes>
 
-            {/* Public Login Route */}
+            {/* Public Landing Page */}
+            <Route path="/" element={<LandingPage />} />
+
+            {/* Public Auth Routes */}
             <Route path="/login" element={<Login />} />
+            <Route path="/signup" element={<Login />} />
 
             {/* Protected Routes */}
             <Route element={
@@ -42,9 +47,6 @@ const App: React.FC = () => {
                 <Layout />
               </ProtectedRoute>
             }>
-
-              {/* Default Route */}
-              <Route path="/" element={<Navigate to="/analytics" replace />} />
 
               {/* Document Analyzer */}
               <Route path="/analyzer" element={<ErrorBoundary><DocumentAnalyzer /></ErrorBoundary>} />
